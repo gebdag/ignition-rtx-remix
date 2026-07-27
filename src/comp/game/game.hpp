@@ -107,8 +107,23 @@ namespace comp::game
 	// no Glide palette is ever supplied and the P_8 path cannot be the one in use.
 	constexpr uint32_t ADDR_g_texFormatFlag = 0x00621E60u;
 
-	// 256 bytes: source palette index -> RGB332.
+	// 256 bytes: source palette index -> RGB332. Only used by the format-0 branch, which the
+	// game does not take.
 	constexpr uint32_t ADDR_g_texRemapLut = 0x00621360u;
+
+	// The live 256 entry colour table, written by the level loader at 0x00404D20 and read by
+	// the display-list interpreter and every chroma-keying rasterizer -- grChromakeyValue is
+	// passed g_colorTable[0]. Entries are Glide GrColor_t in ARGB order; the game sets and
+	// clears the top byte directly (`+ -0x80000000`, `| 0x7F000000`), confirming alpha is high.
+	//
+	// This is per level. SYS.COL happens to match the first track, which is why using it looked
+	// correct until later stages came out miscoloured.
+	constexpr uint32_t ADDR_g_colorTable = 0x00621A60u;
+	constexpr uint32_t COLOR_TABLE_ENTRIES = 256u;
+
+	inline const uint32_t* get_color_table() {
+		return reinterpret_cast<const uint32_t*>(rebase(ADDR_g_colorTable));
+	}
 
 	// --------------
 	// game variables

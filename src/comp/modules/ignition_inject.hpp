@@ -162,8 +162,11 @@ namespace comp
 		// table and the format flag so the encoding can be settled from data.
 		void dump_texture_debug(int32_t tex_id, const uint8_t* src);
 
-		// SYS.COL, loaded once. The uploaded pages are palette indices, not colour.
-		void ensure_palette();
+		// SYS.COL, used only if the live colour table is unreadable.
+		void ensure_fallback_palette();
+
+		// Snapshots the game's live colour table into a page record.
+		void snapshot_palette(uint32_t (&out)[256]);
 
 		// Lowers the game's once-per-36 Hz-tick render gate.
 		static void patch_render_rate();
@@ -182,8 +185,16 @@ namespace comp
 		IDirect3DTexture9* m_white_texture = nullptr;
 		IDirect3DVertexDeclaration9* m_vertex_decl = nullptr;
 
-		// Raw 8bpp pages captured at upload, and the D3D textures built from them on demand.
-		std::unordered_map<int32_t, std::vector<uint8_t>> m_texture_pages;
+		// A page as the game uploaded it, together with the palette that was live at that
+		// moment. The palette is per level, so snapshotting it at upload is what keeps later
+		// stages correct -- a single global palette only matches the first track.
+		struct texture_page
+		{
+			std::vector<uint8_t> pixels;
+			uint32_t palette[256];
+		};
+
+		std::unordered_map<int32_t, texture_page> m_texture_pages;
 		std::unordered_map<int32_t, IDirect3DTexture9*> m_textures;
 		uint32_t m_textures_built = 0;
 		uint32_t m_texture_misses = 0;
@@ -195,7 +206,7 @@ namespace comp
 		std::set<int32_t> m_missing_ids;
 		uint32_t m_debug_dumps = 0;
 
-		uint32_t m_palette[256]{};
+		uint32_t m_fallback_palette[256]{};
 		bool m_palette_loaded = false;
 
 		// Silent failure paths that would otherwise look identical to "the geometry vanished".

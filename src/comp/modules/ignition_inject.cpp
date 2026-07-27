@@ -252,7 +252,8 @@ namespace comp
 	void ignition_inject::on_texture_uploaded(const int32_t tex_id, const uint8_t* src)
 	{
 		auto& page = m_texture_pages[tex_id];
-		page.assign(src, src + game::TEXTURE_PIXELS);
+		page.pixels.assign(src, src + game::TEXTURE_PIXELS);
+		snapshot_palette(page.palette);
 
 		dump_texture_debug(tex_id, src);
 
@@ -301,28 +302,49 @@ namespace comp
 		++m_debug_dumps;
 	}
 
-	// The uploaded pages are GR_TEXFMT_P_8 palette indices -- confirmed at runtime, the format
-	// flag at 0x00621E60 reads 1, so the remap-to-RGB332 branch is never taken and the LUT at
-	// 0x00621360 is not involved. The palette itself is SYS.COL in the game directory: an
-	// 8 byte header followed by 256 RGB triples. Decoding the dumped pages with it produces
-	// coherent wood, dirt, grass and stone at full 24 bit depth.
-	void ignition_inject::ensure_palette()
+	// The uploaded pages are GR_TEXFMT_P_8 palette indices -- the format flag at 0x00621E60
+	// reads 1 at runtime, so the remap-to-RGB332 branch never runs.
+	//
+	// The palette is the game's live colour table, snapshotted per upload because it is per
+	// level: a single global palette matches the first track and miscolours every later one.
+	void ignition_inject::snapshot_palette(uint32_t (&out)[256])
+	{
+		const uint32_t* table = game::get_color_table();
+
+		bool any = false;
+		for (uint32_t i = 0; i < game::COLOR_TABLE_ENTRIES; ++i) {
+			if (table[i] != 0) { any = true; break; }
+		}
+
+		if (!any) {
+			ensure_fallback_palette();
+			memcpy(out, m_fallback_palette, sizeof(out));
+			return;
+		}
+
+		for (uint32_t i = 0; i < game::COLOR_TABLE_ENTRIES; ++i)
+		{
+			// GrColor_t is ARGB; index 0 is the chroma key and becomes fully transparent.
+			const uint32_t c = table[i];
+			out[i] = (i == 0) ? (c & 0x00FFFFFFu) : (0xFF000000u | (c & 0x00FFFFFFu));
+		}
+	}
+
+	// Only reached if the live table has not been populated yet.
+	void ignition_inject::ensure_fallback_palette()
 	{
 		if (m_palette_loaded) {
 			return;
 		}
 		m_palette_loaded = true;
 
-		// Index 0 is the game's transparent colour: it drives the Glide chroma key
-		// (grChromakeyMode / grChromakeyValue) and shows up as large flat regions in cut-out
-		// pages such as fences and foliage.
 		for (int i = 0; i < 256; ++i) {
-			m_palette[i] = 0xFFFF00FFu;   // magenta, so an unloaded palette is unmistakable
+			m_fallback_palette[i] = 0xFFFF00FFu;   // magenta, so a missing palette is obvious
 		}
 
 		std::ifstream file("SYS.COL", std::ios::binary);
 		if (!file) {
-			shared::common::log("IgnTex", "SYS.COL not found - textures will render magenta",
+			shared::common::log("IgnTex", "no live colour table and SYS.COL missing",
 				shared::common::LOG_TYPE::LOG_TYPE_ERROR, true);
 			return;
 		}
@@ -331,24 +353,14 @@ namespace comp
 		uint8_t rgb[256 * 3]{};
 		file.read(reinterpret_cast<char*>(header), sizeof(header));
 		file.read(reinterpret_cast<char*>(rgb), sizeof(rgb));
-
 		if (!file) {
-			shared::common::log("IgnTex", "SYS.COL too short to hold a 256 entry palette",
-				shared::common::LOG_TYPE::LOG_TYPE_ERROR, true);
 			return;
 		}
 
-		for (int i = 0; i < 256; ++i)
-		{
-			const uint32_t r = rgb[i * 3 + 0];
-			const uint32_t g = rgb[i * 3 + 1];
-			const uint32_t b = rgb[i * 3 + 2];
-			const uint32_t a = (i == 0) ? 0x00000000u : 0xFF000000u;
-			m_palette[i] = a | (r << 16) | (g << 8) | b;
+		for (int i = 0; i < 256; ++i) {
+			const uint32_t c = (rgb[i * 3] << 16) | (rgb[i * 3 + 1] << 8) | rgb[i * 3 + 2];
+			m_fallback_palette[i] = (i == 0) ? c : (0xFF000000u | c);
 		}
-
-		shared::common::log("IgnTex", "Loaded SYS.COL palette (index 0 transparent)",
-			shared::common::LOG_TYPE::LOG_TYPE_GREEN, true);
 	}
 
 	IDirect3DTexture9* ignition_inject::texture_for(IDirect3DDevice9* dev, const int32_t tex_id)
@@ -377,17 +389,16 @@ namespace comp
 			return m_white_texture;
 		}
 
-		ensure_palette();
-
 		D3DLOCKED_RECT rect{};
 		if (SUCCEEDED(tex->LockRect(0, &rect, nullptr, 0)))
 		{
-			const auto& bytes = page->second;
+			const auto& bytes = page->second.pixels;
+			const auto& pal = page->second.palette;
 			for (int y = 0; y < game::TEXTURE_SIZE; ++y)
 			{
 				auto* dst = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(rect.pBits) + y * rect.Pitch);
 				for (int x = 0; x < game::TEXTURE_SIZE; ++x) {
-					dst[x] = m_palette[bytes[y * game::TEXTURE_SIZE + x]];
+					dst[x] = pal[bytes[y * game::TEXTURE_SIZE + x]];
 				}
 			}
 			tex->UnlockRect(0);
