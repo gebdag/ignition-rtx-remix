@@ -16,16 +16,24 @@ namespace comp
 		game::UploadTexture_t o_upload_texture = nullptr;
 		game::RunDisplayList_t o_run_display_list = nullptr;
 
-		// Drops the world display list before it becomes Glide calls, leaving the HUD and menu
-		// lists untouched. Identified by return address because the same function serves both.
+		// Drops the world display list before it becomes Glide calls, leaving 2D overlays
+		// untouched. Identified by return address because one function serves every list.
 		void __cdecl hk_run_display_list(void* ctx)
 		{
 			const auto ret = reinterpret_cast<uint32_t>(_ReturnAddress());
 
-			if (ignition_inject::suppress_world_raster()
-				&& (ret == game::rebase(game::RET_WorldDisplayList_A)
-					|| ret == game::rebase(game::RET_WorldDisplayList_B)))
-			{
+			const bool is_world = (ret == game::rebase(game::RET_WorldDisplayList_A)
+				|| ret == game::rebase(game::RET_WorldDisplayList_B)
+				|| ret == game::rebase(game::RET_WorldDisplayList_C));
+
+			if (is_world) {
+				++ignition_inject::s_world_lists_seen;
+			}
+			else {
+				++ignition_inject::s_other_lists_seen;
+			}
+
+			if (is_world && ignition_inject::suppress_world_raster()) {
 				++ignition_inject::s_world_lists_dropped;
 				return;
 			}
@@ -869,6 +877,7 @@ namespace comp
 				m_tex_index_oob, m_tex_entry_unset, m_missing_ids.size(),
 				m_vb_create_failed, m_tex_create_failed, m_obj_no_mesh, m_obj_insane_counts,
 				m_obj_extract_failed, m_captures_merged_pass,
+				s_world_lists_seen, s_world_lists_dropped, s_other_lists_seen,
 				static_cast<uint32_t>(m_last_draw_error)),
 				shared::common::LOG_TYPE::LOG_TYPE_DEFAULT, true);
 		}

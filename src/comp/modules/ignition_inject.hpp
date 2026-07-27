@@ -48,6 +48,13 @@ namespace comp
 		static bool suppress_world_raster();
 		static inline uint32_t s_world_lists_dropped = 0;
 
+		// world lists seen vs captures answers a specific question: a world display list can
+		// only exist if RenderScene ran, and RenderScene always calls TransformAllObjects. So
+		// world > 0 with captures == 0 means our transform hook is not firing, whereas both
+		// being 0 just means no 3D scene was on screen.
+		static inline uint32_t s_world_lists_seen = 0;
+		static inline uint32_t s_other_lists_seen = 0;
+
 		// nGlide composites its whole frame offscreen and blits it to the back buffer with a
 		// single StretchRect. That blit lands on top of whatever Remix produced, so while it
 		// runs the path traced image can never be seen. Suppressing just the blit is far more

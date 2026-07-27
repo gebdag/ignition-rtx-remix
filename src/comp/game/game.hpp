@@ -62,8 +62,15 @@ namespace comp::game
 	// RunDisplayList(ctx) -- walks a display list and turns it into Glide calls. Called for the
 	// world right after each RenderScene, and separately for HUD and menu overlays:
 	//
-	//   world : 0x00437014, 0x00437298   (return addresses 0x00437019, 0x0043729D)
-	//   other : 0x00409D1E, 0x00409DF7, 0x0043D957, 0x0043EA1E, 0x0043FE6E
+	// A world flush is recognisable by the call immediately following RenderScene with the
+	// same viewport context (0x0048A020):
+	//
+	//   world : 0x00437014, 0x00437298  (race)   -> returns 0x00437019, 0x0043729D
+	//           0x00409D1E              (menu)   -> returns 0x00409D23
+	//   other : 0x00409DF7, 0x0043D957, 0x0043EA1E, 0x0043FE6E
+	//
+	// 0x00409DF7 sits in a function that never calls RenderScene, so it is a genuine 2D
+	// overlay and must keep drawing.
 	//
 	// Skipping the world calls stops those triangles being emitted at all, which is the only
 	// reliable place to separate world from HUD: nGlide buffers Glide calls and flushes them at
@@ -73,8 +80,9 @@ namespace comp::game
 	constexpr uint32_t ADDR_RunDisplayList = 0x00450EC0u;
 	typedef void(__cdecl* RunDisplayList_t)(void* ctx);
 
-	constexpr uint32_t RET_WorldDisplayList_A = 0x00437019u;
-	constexpr uint32_t RET_WorldDisplayList_B = 0x0043729Du;
+	constexpr uint32_t RET_WorldDisplayList_A = 0x00437019u;   // race viewport 1
+	constexpr uint32_t RET_WorldDisplayList_B = 0x0043729Du;   // race viewport 2
+	constexpr uint32_t RET_WorldDisplayList_C = 0x00409D23u;   // menu / attract scene
 
 	// The per-pass visibility filter. Objects carry a tag at +0x24; a pass includes an object
 	// when the tag is 0 or equals this value.
