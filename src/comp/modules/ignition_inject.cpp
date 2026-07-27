@@ -156,6 +156,21 @@ namespace comp
 		return on;
 	}
 
+	bool ignition_inject::should_drop_game_draw()
+	{
+		if (!suppress_game_raster()) {
+			return false;
+		}
+
+		static const bool keep_ui =
+			shared::common::config::get().get_bool("Ignition", "KeepGameUI", true);
+
+		// The world is depth tested; Ignition's 2D display-list output is not. That split is
+		// carried by the render state, which survives nGlide's buffering, unlike anything we
+		// could flag during the game's own display-list walk.
+		return keep_ui ? s_game_z_enabled : true;
+	}
+
 	bool ignition_inject::suppress_game_blit()
 	{
 		static const bool on =

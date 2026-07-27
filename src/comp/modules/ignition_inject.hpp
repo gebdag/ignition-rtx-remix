@@ -34,6 +34,15 @@ namespace comp
 		// means it was being traced all along and merely hidden behind the game's blit.
 		static bool suppress_game_raster();
 
+		// Depth state as last set by the game, shadowed from SetRenderState.
+		static inline bool s_game_z_enabled = true;
+
+		// Whether an nGlide draw should be dropped. With KeepGameUI on, only depth-tested
+		// draws are dropped -- those are the 3D world, which we replace. Depth-less draws are
+		// the HUD and are let through so Remix sees them as ordinary pre-transformed geometry
+		// it can categorise and tag.
+		static bool should_drop_game_draw();
+
 		// nGlide composites its whole frame offscreen and blits it to the back buffer with a
 		// single StretchRect. That blit lands on top of whatever Remix produced, so while it
 		// runs the path traced image can never be seen. Suppressing just the blit is far more

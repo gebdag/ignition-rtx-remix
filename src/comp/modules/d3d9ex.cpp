@@ -437,6 +437,15 @@ namespace comp
 	HRESULT d3d9ex::D3D9Device::SetRenderState(D3DRENDERSTATETYPE State, DWORD Value)
 	{
 		TRACE_IF_ACTIVE(trace_SetRenderState, State, Value);
+
+		// Shadow the depth state so draws can be classified without querying the device.
+		// nGlide buffers Glide calls and flushes them at swap, so anything the game told us
+		// during its display-list walk is long gone by the time the draws arrive -- but the
+		// render state travels with them.
+		if (!ignition_inject::s_injecting) {
+			if (State == D3DRS_ZENABLE) ignition_inject::s_game_z_enabled = (Value != D3DZB_FALSE);
+		}
+
 		return m_pIDirect3DDevice9->SetRenderState(State, Value);
 	}
 
@@ -585,7 +594,7 @@ namespace comp
 		if (!ignition_inject::s_injecting) { ++ignition_inject::s_census.draw_prim; ++ignition_inject::s_game_draws_this_frame; }
 
 		// Diagnostic: with SuppressGameRaster on, only our injected geometry is drawn.
-		if (ignition_inject::suppress_game_raster() && !ignition_inject::s_injecting) {
+		if (!ignition_inject::s_injecting && ignition_inject::should_drop_game_draw()) {
 			return D3D_OK;
 		}
 
@@ -598,7 +607,7 @@ namespace comp
 		TRACE_IF_ACTIVE(trace_DrawIndexedPrimitive, PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
 		if (!ignition_inject::s_injecting) { ++ignition_inject::s_census.draw_indexed; ++ignition_inject::s_game_draws_this_frame; }
 
-		if (ignition_inject::suppress_game_raster() && !ignition_inject::s_injecting) {
+		if (!ignition_inject::s_injecting && ignition_inject::should_drop_game_draw()) {
 			return D3D_OK;
 		}
 
@@ -612,7 +621,7 @@ namespace comp
 		if (!ignition_inject::s_injecting) { ++ignition_inject::s_census.draw_prim_up; ++ignition_inject::s_game_draws_this_frame; }
 
 		// nGlide draws its buffered Glide triangles through the UP entry points.
-		if (ignition_inject::suppress_game_raster() && !ignition_inject::s_injecting) {
+		if (!ignition_inject::s_injecting && ignition_inject::should_drop_game_draw()) {
 			return D3D_OK;
 		}
 
@@ -633,7 +642,7 @@ namespace comp
 		TRACE_IF_ACTIVE(trace_DrawIndexedPrimitiveUP, PrimitiveType, MinVertexIndex, NumVertices, PrimitiveCount, pIndexData, IndexDataFormat, pVertexStreamZeroData, VertexStreamZeroStride);
 		if (!ignition_inject::s_injecting) { ++ignition_inject::s_census.draw_indexed_up; ++ignition_inject::s_game_draws_this_frame; }
 
-		if (ignition_inject::suppress_game_raster() && !ignition_inject::s_injecting) {
+		if (!ignition_inject::s_injecting && ignition_inject::should_drop_game_draw()) {
 			return D3D_OK;
 		}
 
