@@ -60,6 +60,9 @@ namespace comp
 		// we submit, we are already too late and nothing we send can be raytraced.
 		static inline uint32_t s_game_draws_this_frame = 0;
 
+		// Called from the UploadTexture detour once the game has a mipmap id for the page.
+		void on_texture_uploaded(int32_t tex_id, const uint8_t* src);
+
 		// Called from the proxy's Present; logs and resets the census.
 		void on_present();
 
@@ -89,6 +92,18 @@ namespace comp
 			float u, v;
 		};
 
+		// A run of triangles inside one mesh that share a texture selector. Faces are sorted by
+		// selector when the buffer is built so each distinct texture costs exactly one draw.
+		//
+		// The selector is stored rather than a resolved texture because resolution needs the
+		// object's texture page too, and one mesh is instanced by objects on different pages.
+		struct mesh_part
+		{
+			int32_t tex_sel;
+			uint32_t first_triangle;
+			uint32_t triangle_count;
+		};
+
 		// A mesh uploaded once and reused. Static contents are what let Remix keep the
 		// acceleration structure it builds instead of rebuilding it every frame.
 		struct mesh_geometry
@@ -97,12 +112,14 @@ namespace comp
 			uint32_t vertex_count;
 			uint32_t triangle_count;
 			uint32_t last_used_scene;
+			std::vector<mesh_part> parts;
 		};
 
 		struct queued_instance
 		{
 			const mesh_geometry* geometry;
 			D3DMATRIX world;
+			int32_t tex_page;
 		};
 
 		void submit(IDirect3DDevice9* dev);
@@ -111,7 +128,13 @@ namespace comp
 		static D3DMATRIX build_world(const game::ign_object* obj);
 
 		const mesh_geometry* geometry_for(IDirect3DDevice9* dev, game::ign_mesh* mesh);
-		static bool extract_geometry(const game::ign_mesh* mesh, std::vector<ffp_vertex>& out);
+		static bool extract_geometry(const game::ign_mesh* mesh, std::vector<ffp_vertex>& out,
+		                            std::vector<mesh_part>& parts);
+
+		// Textures arrive before a device exists, so the raw 8bpp page is kept and converted on
+		// first use. Keyed by GrMipMapId_t, which is what g_texTable stores and what the game's
+		// own guTexSource call would have received.
+		IDirect3DTexture9* texture_for(IDirect3DDevice9* dev, int32_t tex_id);
 
 		void ensure_white_texture(IDirect3DDevice9* dev);
 		void evict_stale_geometry();
@@ -126,6 +149,12 @@ namespace comp
 
 		IDirect3DTexture9* m_white_texture = nullptr;
 		IDirect3DVertexDeclaration9* m_vertex_decl = nullptr;
+
+		// Raw 8bpp pages captured at upload, and the D3D textures built from them on demand.
+		std::unordered_map<int32_t, std::vector<uint8_t>> m_texture_pages;
+		std::unordered_map<int32_t, IDirect3DTexture9*> m_textures;
+		uint32_t m_textures_built = 0;
+		uint32_t m_texture_misses = 0;
 
 
 		uint32_t m_viewport_index = 0;

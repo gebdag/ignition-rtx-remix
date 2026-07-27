@@ -10,6 +10,20 @@ namespace comp
 		using namespace game;
 
 		game::RenderScene_t o_render_scene = nullptr;
+		game::UploadTexture_t o_upload_texture = nullptr;
+
+		// The game hands Glide a mipmap id; the same id is what g_texTable stores and what our
+		// per-face lookup resolves to, so capturing the pair here is all the correlation needed.
+		int __cdecl hk_upload_texture(void* src)
+		{
+			const int tex_id = o_upload_texture(src);
+
+			if (const auto self = ignition_inject::get(); self && src && tex_id != game::TEX_ID_INVALID) {
+				self->on_texture_uploaded(tex_id, static_cast<const uint8_t*>(src));
+			}
+
+			return tex_id;
+		}
 
 		void __cdecl hk_render_scene()
 		{
@@ -100,6 +114,80 @@ namespace comp
 			shared::common::log("Ignition", std::format("failed to hook RenderScene @ 0x{:08X}",
 				game::ADDR_RenderScene), shared::common::LOG_TYPE::LOG_TYPE_ERROR, true);
 		}
+
+		if (!shared::utils::hook::detour(game::rebase(game::ADDR_UploadTexture), hk_upload_texture,
+			reinterpret_cast<void**>(&o_upload_texture)))
+		{
+			shared::common::log("Ignition", std::format("failed to hook UploadTexture @ 0x{:08X}",
+				game::ADDR_UploadTexture), shared::common::LOG_TYPE::LOG_TYPE_ERROR, true);
+		}
+	}
+
+	// Keeps the raw page. A device may not exist yet -- textures are uploaded during level load,
+	// well before the first frame -- so conversion is deferred to first use.
+	void ignition_inject::on_texture_uploaded(const int32_t tex_id, const uint8_t* src)
+	{
+		auto& page = m_texture_pages[tex_id];
+		page.assign(src, src + game::TEXTURE_PIXELS);
+
+		// A re-upload to the same id means new content; drop the stale conversion.
+		if (const auto it = m_textures.find(tex_id); it != m_textures.end()) {
+			if (it->second) it->second->Release();
+			m_textures.erase(it);
+		}
+	}
+
+	IDirect3DTexture9* ignition_inject::texture_for(IDirect3DDevice9* dev, const int32_t tex_id)
+	{
+		if (tex_id == game::TEX_ID_INVALID) {
+			return m_white_texture;
+		}
+
+		if (const auto it = m_textures.find(tex_id); it != m_textures.end()) {
+			return it->second ? it->second : m_white_texture;
+		}
+
+		const auto page = m_texture_pages.find(tex_id);
+		if (page == m_texture_pages.end()) {
+			++m_texture_misses;
+			return m_white_texture;
+		}
+
+		IDirect3DTexture9* tex = nullptr;
+		if (FAILED(dev->CreateTexture(game::TEXTURE_SIZE, game::TEXTURE_SIZE, 1, 0,
+			D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &tex, nullptr)) || !tex)
+		{
+			m_textures[tex_id] = nullptr;
+			return m_white_texture;
+		}
+
+		// The game remaps its source bytes through this table into GR_TEXFMT_RGB_332 before
+		// handing them to Glide, so the same table reproduces exactly what it displays.
+		const auto lut = reinterpret_cast<const uint8_t*>(game::rebase(game::ADDR_g_texRemapLut));
+
+		D3DLOCKED_RECT rect{};
+		if (SUCCEEDED(tex->LockRect(0, &rect, nullptr, 0)))
+		{
+			const auto& bytes = page->second;
+			for (int y = 0; y < game::TEXTURE_SIZE; ++y)
+			{
+				auto* dst = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(rect.pBits) + y * rect.Pitch);
+				for (int x = 0; x < game::TEXTURE_SIZE; ++x)
+				{
+					const uint8_t c = lut[bytes[y * game::TEXTURE_SIZE + x]];
+					// RGB332: rrrgggbb, expanded so that full bits map to full intensity.
+					const uint32_t r = ((c >> 5) & 0x7) * 255 / 7;
+					const uint32_t g = ((c >> 2) & 0x7) * 255 / 7;
+					const uint32_t b = (c & 0x3) * 255 / 3;
+					dst[x] = 0xFF000000u | (r << 16) | (g << 8) | b;
+				}
+			}
+			tex->UnlockRect(0);
+		}
+
+		++m_textures_built;
+		m_textures[tex_id] = tex;
+		return tex;
 	}
 
 	ignition_inject::~ignition_inject()
@@ -115,6 +203,12 @@ namespace comp
 		}
 		m_geometry.clear();
 
+		for (auto& [id, tex] : m_textures) {
+			if (tex) tex->Release();
+		}
+		m_textures.clear();
+		m_texture_pages.clear();
+
 		if (m_white_texture) { m_white_texture->Release(); m_white_texture = nullptr; }
 		if (m_vertex_decl) { m_vertex_decl->Release(); m_vertex_decl = nullptr; }
 	}
@@ -124,13 +218,19 @@ namespace comp
 	// The face stream is variable stride and can end early on a terminator, so it is walked
 	// sequentially and never indexed. Object-space Y is negated to match the transform, which
 	// computes world Y as (object.y - vertex.y).
-	bool ignition_inject::extract_geometry(const game::ign_mesh* mesh, std::vector<ffp_vertex>& out)
+	bool ignition_inject::extract_geometry(const game::ign_mesh* mesh, std::vector<ffp_vertex>& out,
+	                                       std::vector<mesh_part>& parts)
 	{
 		const auto verts = game::mesh_vertices(mesh);
 		const auto face_base = static_cast<const uint8_t*>(game::mesh_faces(mesh));
 		const int32_t n_verts = mesh->vertex_count;
 
 		out.clear();
+		parts.clear();
+
+		// Gathered first, then sorted by selector so that each texture becomes one draw.
+		struct pending_tri { int32_t tex_sel; ffp_vertex v[3]; };
+		std::vector<pending_tri> tris;
 
 		const uint8_t* cur = face_base;
 		for (int32_t i = 0; i < mesh->face_count; ++i)
@@ -185,14 +285,35 @@ namespace comp
 					else { nx = 0.0f; ny = 1.0f; nz = 0.0f; }
 
 					for (auto& t : tri) { t.nx = nx; t.ny = ny; t.nz = nz; }
-					out.insert(out.end(), tri, tri + 3);
+
+					pending_tri pt{};
+					pt.tex_sel = f->tex_sel;
+					pt.v[0] = tri[0]; pt.v[1] = tri[1]; pt.v[2] = tri[2];
+					tris.push_back(pt);
 				}
 			}
 
 			cur += stride;
 		}
 
-		return !out.empty();
+		if (tris.empty()) {
+			return false;
+		}
+
+		std::stable_sort(tris.begin(), tris.end(),
+			[](const pending_tri& a, const pending_tri& b) { return a.tex_sel < b.tex_sel; });
+
+		out.reserve(tris.size() * 3);
+		for (size_t i = 0; i < tris.size(); ++i)
+		{
+			if (parts.empty() || parts.back().tex_sel != tris[i].tex_sel) {
+				parts.push_back({ tris[i].tex_sel, static_cast<uint32_t>(i), 0 });
+			}
+			++parts.back().triangle_count;
+			out.insert(out.end(), tris[i].v, tris[i].v + 3);
+		}
+
+		return true;
 	}
 
 	const ignition_inject::mesh_geometry* ignition_inject::geometry_for(IDirect3DDevice9* dev,
@@ -204,7 +325,8 @@ namespace comp
 		}
 
 		std::vector<ffp_vertex> vertices;
-		if (!extract_geometry(mesh, vertices)) {
+		std::vector<mesh_part> parts;
+		if (!extract_geometry(mesh, vertices, parts)) {
 			return nullptr;
 		}
 
@@ -228,6 +350,7 @@ namespace comp
 		geo.vertex_count = static_cast<uint32_t>(vertices.size());
 		geo.triangle_count = geo.vertex_count / 3;
 		geo.last_used_scene = m_scenes_submitted;
+		geo.parts = std::move(parts);
 
 		return &(m_geometry[mesh] = geo);
 	}
@@ -381,7 +504,7 @@ namespace comp
 			}
 
 			if (const auto geo = geometry_for(dev, mesh); geo && geo->triangle_count) {
-				m_queue.push_back({ geo, build_world(obj) });
+				m_queue.push_back({ geo, build_world(obj), obj->tex_page });
 			}
 		}
 	}
@@ -432,9 +555,10 @@ namespace comp
 		{
 			shared::common::log("Ignition", std::format(
 				"captures={} (noScene={} noDevice={} skippedViewport={}) endScenes={} submits={} "
-				"lastDraws={} lastVerts={} meshes={} lastDrawErr=0x{:08X}",
+				"lastDraws={} lastVerts={} meshes={} tex(built={} pages={} misses={}) lastDrawErr=0x{:08X}",
 				m_captures, m_captures_no_scene, m_captures_no_device, m_captures_skipped_viewport,
 				m_end_scenes, m_submits, m_last_draws, m_last_vertices, m_geometry.size(),
+				m_textures_built, m_texture_pages.size(), m_texture_misses,
 				static_cast<uint32_t>(m_last_draw_error)),
 				shared::common::LOG_TYPE::LOG_TYPE_DEFAULT, true);
 		}
@@ -523,7 +647,6 @@ namespace comp
 		dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
 
 		ensure_white_texture(dev);
-		dev->SetTexture(0, m_white_texture);
 		dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
 		dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
 		dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
@@ -554,14 +677,20 @@ namespace comp
 			dev->SetTransform(D3DTS_WORLD, &inst.world);
 			dev->SetStreamSource(0, inst.geometry->vertex_buffer, 0, sizeof(ffp_vertex));
 
-			const HRESULT hr = dev->DrawPrimitive(D3DPT_TRIANGLELIST, 0, inst.geometry->triangle_count);
-			if (SUCCEEDED(hr))
+			for (const auto& part : inst.geometry->parts)
 			{
-				++draws;
-				vertices += inst.geometry->vertex_count;
-			}
-			else {
-				m_last_draw_error = hr;
+				dev->SetTexture(0, texture_for(dev, game::resolve_texture_id(part.tex_sel, inst.tex_page)));
+
+				const HRESULT hr = dev->DrawPrimitive(D3DPT_TRIANGLELIST,
+					part.first_triangle * 3, part.triangle_count);
+				if (SUCCEEDED(hr))
+				{
+					++draws;
+					vertices += part.triangle_count * 3;
+				}
+				else {
+					m_last_draw_error = hr;
+				}
 			}
 		}
 		s_injecting = false;

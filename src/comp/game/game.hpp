@@ -31,9 +31,23 @@ namespace comp::game
 	// Only needed if we ever want the game's own per-face material resolution.
 	constexpr uint32_t ADDR_EmitAllFaces = 0x0044E8D0u;
 
-	// guTexDownloadMipMap call site -- where texel data enters Glide texture memory.
-	// Hooking here is how we capture texture content for Remix hashing/replacement.
-	constexpr uint32_t ADDR_TexDownloadCall = 0x00450E9Eu;
+	// UploadTexture(src) -- the game's only texture upload path, called from 0x00409E10 and
+	// 0x00415E50. Always 256x256 at 8 bits per pixel. It remaps the source bytes through
+	// g_texRemapLut into GR_TEXFMT_RGB_332 and returns the GrMipMapId_t that g_texTable stores,
+	// which is what per-face texSel ultimately resolves to.
+	constexpr uint32_t ADDR_UploadTexture = 0x00450E10u;
+	typedef int(__cdecl* UploadTexture_t)(void* src);
+
+	constexpr int TEXTURE_SIZE = 256;
+	constexpr int TEXTURE_PIXELS = TEXTURE_SIZE * TEXTURE_SIZE;
+
+	// Selects the upload format: 0 takes the remap-to-RGB332 path, anything else uploads raw
+	// GR_TEXFMT_P_8 indices. grTexDownloadTable is never called anywhere in the executable, so
+	// no Glide palette is ever supplied and the P_8 path cannot be the one in use.
+	constexpr uint32_t ADDR_g_texFormatFlag = 0x00621E60u;
+
+	// 256 bytes: source palette index -> RGB332.
+	constexpr uint32_t ADDR_g_texRemapLut = 0x00621360u;
 
 	// --------------
 	// game variables
@@ -44,8 +58,19 @@ namespace comp::game
 	// ign_object*** -- array of object pointers, scene->object_count entries.
 	constexpr uint32_t ADDR_g_objectList = 0x00622E78u;
 
-	// texSel >> 16, plus object->tex_page * 0x20, indexes this table.
+	// texSel >> 16, plus object->tex_page * 0x20, indexes this table. 512 entries, reset to
+	// 0xFFFFFFFF (invalid mipmap id) by the renderer init at 0x0044A9E0.
 	constexpr uint32_t ADDR_g_texTable = 0x00622EA0u;
+	constexpr uint32_t TEX_TABLE_ENTRIES = 512u;
+	constexpr int32_t TEX_ID_INVALID = -1;
+
+	inline int32_t resolve_texture_id(const int32_t tex_sel, const int32_t tex_page) {
+		const uint32_t index = static_cast<uint32_t>(tex_sel >> 16) + tex_page * 0x20u;
+		if (index >= TEX_TABLE_ENTRIES) {
+			return TEX_ID_INVALID;
+		}
+		return reinterpret_cast<const int32_t*>(rebase(ADDR_g_texTable))[index];
+	}
 
 	// The fused projection*view 3x3 the game itself uses, fixed point 16.16. We do NOT feed
 	// this to Remix -- rows 0/1 have the focal lengths baked in and row 2 is scaled by 2^18.
