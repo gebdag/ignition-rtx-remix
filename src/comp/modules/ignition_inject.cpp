@@ -3,6 +3,9 @@
 #include "ignition_inject.hpp"
 #include "shared/common/config.hpp"
 
+#include <filesystem>
+#include <fstream>
+
 namespace comp
 {
 	namespace
@@ -130,11 +133,101 @@ namespace comp
 		auto& page = m_texture_pages[tex_id];
 		page.assign(src, src + game::TEXTURE_PIXELS);
 
+		dump_texture_debug(tex_id, src);
+
 		// A re-upload to the same id means new content; drop the stale conversion.
 		if (const auto it = m_textures.find(tex_id); it != m_textures.end()) {
 			if (it->second) it->second->Release();
 			m_textures.erase(it);
 		}
+	}
+
+	// One-shot dump of the raw inputs to the texture conversion, so the encoding can be
+	// determined from real data instead of inferred from the disassembly. Writes the source
+	// page exactly as the game passed it, plus the remap table and the format flag that picks
+	// between the RGB332 and P_8 branches.
+	void ignition_inject::dump_texture_debug(const int32_t tex_id, const uint8_t* src)
+	{
+		if (m_debug_dumps >= 4 || !shared::common::config::get().get_bool("Ignition", "DumpTextures", false)) {
+			return;
+		}
+
+		const auto dir = std::filesystem::path("rtx_comp") / "texdump";
+		std::error_code ec;
+		std::filesystem::create_directories(dir, ec);
+
+		if (m_debug_dumps == 0)
+		{
+			const auto lut = reinterpret_cast<const uint8_t*>(game::rebase(game::ADDR_g_texRemapLut));
+			std::ofstream(dir / "lut.bin", std::ios::binary).write(
+				reinterpret_cast<const char*>(lut), 256);
+
+			const int32_t flag = *reinterpret_cast<const int32_t*>(game::rebase(game::ADDR_g_texFormatFlag));
+			uint32_t distinct = 0;
+			bool seen[256]{};
+			for (int i = 0; i < 256; ++i) { if (!seen[lut[i]]) { seen[lut[i]] = true; ++distinct; } }
+
+			shared::common::log("IgnTex", std::format(
+				"formatFlag={} -> {} | LUT distinct={} identity={}",
+				flag, flag == 0 ? "remap to RGB332 (fmt 0)" : "raw P_8 (fmt 5)",
+				distinct, [&] { for (int i = 0; i < 256; ++i) if (lut[i] != i) return "no"; return "yes"; }()),
+				shared::common::LOG_TYPE::LOG_TYPE_GREEN, true);
+		}
+
+		std::ofstream(dir / std::format("page_{:04d}.bin", tex_id), std::ios::binary).write(
+			reinterpret_cast<const char*>(src), game::TEXTURE_PIXELS);
+
+		++m_debug_dumps;
+	}
+
+	// The uploaded pages are GR_TEXFMT_P_8 palette indices -- confirmed at runtime, the format
+	// flag at 0x00621E60 reads 1, so the remap-to-RGB332 branch is never taken and the LUT at
+	// 0x00621360 is not involved. The palette itself is SYS.COL in the game directory: an
+	// 8 byte header followed by 256 RGB triples. Decoding the dumped pages with it produces
+	// coherent wood, dirt, grass and stone at full 24 bit depth.
+	void ignition_inject::ensure_palette()
+	{
+		if (m_palette_loaded) {
+			return;
+		}
+		m_palette_loaded = true;
+
+		// Index 0 is the game's transparent colour: it drives the Glide chroma key
+		// (grChromakeyMode / grChromakeyValue) and shows up as large flat regions in cut-out
+		// pages such as fences and foliage.
+		for (int i = 0; i < 256; ++i) {
+			m_palette[i] = 0xFFFF00FFu;   // magenta, so an unloaded palette is unmistakable
+		}
+
+		std::ifstream file("SYS.COL", std::ios::binary);
+		if (!file) {
+			shared::common::log("IgnTex", "SYS.COL not found - textures will render magenta",
+				shared::common::LOG_TYPE::LOG_TYPE_ERROR, true);
+			return;
+		}
+
+		uint8_t header[8]{};
+		uint8_t rgb[256 * 3]{};
+		file.read(reinterpret_cast<char*>(header), sizeof(header));
+		file.read(reinterpret_cast<char*>(rgb), sizeof(rgb));
+
+		if (!file) {
+			shared::common::log("IgnTex", "SYS.COL too short to hold a 256 entry palette",
+				shared::common::LOG_TYPE::LOG_TYPE_ERROR, true);
+			return;
+		}
+
+		for (int i = 0; i < 256; ++i)
+		{
+			const uint32_t r = rgb[i * 3 + 0];
+			const uint32_t g = rgb[i * 3 + 1];
+			const uint32_t b = rgb[i * 3 + 2];
+			const uint32_t a = (i == 0) ? 0x00000000u : 0xFF000000u;
+			m_palette[i] = a | (r << 16) | (g << 8) | b;
+		}
+
+		shared::common::log("IgnTex", "Loaded SYS.COL palette (index 0 transparent)",
+			shared::common::LOG_TYPE::LOG_TYPE_GREEN, true);
 	}
 
 	IDirect3DTexture9* ignition_inject::texture_for(IDirect3DDevice9* dev, const int32_t tex_id)
@@ -150,6 +243,7 @@ namespace comp
 		const auto page = m_texture_pages.find(tex_id);
 		if (page == m_texture_pages.end()) {
 			++m_texture_misses;
+			if (m_missing_ids.size() < 32) m_missing_ids.insert(tex_id);
 			return m_white_texture;
 		}
 
@@ -157,13 +251,12 @@ namespace comp
 		if (FAILED(dev->CreateTexture(game::TEXTURE_SIZE, game::TEXTURE_SIZE, 1, 0,
 			D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &tex, nullptr)) || !tex)
 		{
+			++m_tex_create_failed;
 			m_textures[tex_id] = nullptr;
 			return m_white_texture;
 		}
 
-		// The game remaps its source bytes through this table into GR_TEXFMT_RGB_332 before
-		// handing them to Glide, so the same table reproduces exactly what it displays.
-		const auto lut = reinterpret_cast<const uint8_t*>(game::rebase(game::ADDR_g_texRemapLut));
+		ensure_palette();
 
 		D3DLOCKED_RECT rect{};
 		if (SUCCEEDED(tex->LockRect(0, &rect, nullptr, 0)))
@@ -172,14 +265,8 @@ namespace comp
 			for (int y = 0; y < game::TEXTURE_SIZE; ++y)
 			{
 				auto* dst = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(rect.pBits) + y * rect.Pitch);
-				for (int x = 0; x < game::TEXTURE_SIZE; ++x)
-				{
-					const uint8_t c = lut[bytes[y * game::TEXTURE_SIZE + x]];
-					// RGB332: rrrgggbb, expanded so that full bits map to full intensity.
-					const uint32_t r = ((c >> 5) & 0x7) * 255 / 7;
-					const uint32_t g = ((c >> 2) & 0x7) * 255 / 7;
-					const uint32_t b = (c & 0x3) * 255 / 3;
-					dst[x] = 0xFF000000u | (r << 16) | (g << 8) | b;
+				for (int x = 0; x < game::TEXTURE_SIZE; ++x) {
+					dst[x] = m_palette[bytes[y * game::TEXTURE_SIZE + x]];
 				}
 			}
 			tex->UnlockRect(0);
@@ -229,7 +316,7 @@ namespace comp
 		parts.clear();
 
 		// Gathered first, then sorted by selector so that each texture becomes one draw.
-		struct pending_tri { int32_t tex_sel; ffp_vertex v[3]; };
+		struct pending_tri { int32_t tex_sel; bool chroma_keyed; ffp_vertex v[3]; };
 		std::vector<pending_tri> tris;
 
 		const uint8_t* cur = face_base;
@@ -288,6 +375,7 @@ namespace comp
 
 					pending_tri pt{};
 					pt.tex_sel = f->tex_sel;
+					pt.chroma_keyed = game::face_is_chroma_keyed(op);
 					pt.v[0] = tri[0]; pt.v[1] = tri[1]; pt.v[2] = tri[2];
 					tris.push_back(pt);
 				}
@@ -300,14 +388,17 @@ namespace comp
 			return false;
 		}
 
-		std::stable_sort(tris.begin(), tris.end(),
-			[](const pending_tri& a, const pending_tri& b) { return a.tex_sel < b.tex_sel; });
+		std::stable_sort(tris.begin(), tris.end(), [](const pending_tri& a, const pending_tri& b) {
+			if (a.chroma_keyed != b.chroma_keyed) return a.chroma_keyed < b.chroma_keyed;
+			return a.tex_sel < b.tex_sel;
+		});
 
 		out.reserve(tris.size() * 3);
 		for (size_t i = 0; i < tris.size(); ++i)
 		{
-			if (parts.empty() || parts.back().tex_sel != tris[i].tex_sel) {
-				parts.push_back({ tris[i].tex_sel, static_cast<uint32_t>(i), 0 });
+			if (parts.empty() || parts.back().tex_sel != tris[i].tex_sel
+				|| parts.back().chroma_keyed != tris[i].chroma_keyed) {
+				parts.push_back({ tris[i].tex_sel, tris[i].chroma_keyed, static_cast<uint32_t>(i), 0 });
 			}
 			++parts.back().triangle_count;
 			out.insert(out.end(), tris[i].v, tris[i].v + 3);
@@ -334,6 +425,7 @@ namespace comp
 
 		IDirect3DVertexBuffer9* vb = nullptr;
 		if (FAILED(dev->CreateVertexBuffer(bytes, D3DUSAGE_WRITEONLY, 0, D3DPOOL_MANAGED, &vb, nullptr))) {
+			++m_vb_create_failed;
 			return nullptr;
 		}
 
@@ -466,14 +558,6 @@ namespace comp
 		// viewport in the same frame discard the geometry the first one captured, and since
 		// the queue is not refilled until the next frame that frame submits nothing at all --
 		// which showed up as scenery blinking out whenever a second view was on screen.
-		if (m_viewport_index++ != 0) {
-			++m_captures_skipped_viewport;
-			return;
-		}
-
-		m_scene_valid = false;
-		m_queue.clear();
-
 		const auto scene = game::get_scene();
 		const auto objects = game::get_object_list();
 		if (!scene || !objects || scene->object_count <= 0) {
@@ -487,23 +571,63 @@ namespace comp
 			return;
 		}
 
-		m_scene = *scene;
-		m_scene_valid = true;
+		const bool first_of_frame = (m_viewport_index++ == 0);
 
-		for (int32_t i = 0; i < m_scene.object_count; ++i)
+		if (first_of_frame)
+		{
+			m_scene = *scene;
+			m_scene_valid = true;
+			m_queue.clear();
+		}
+		else
+		{
+			// Ignition draws the world in more than one pass per frame, each carrying a
+			// different slice of the object list -- counts swing between roughly 130 and 350
+			// while the camera barely moves. Dropping the later passes made near and far
+			// scenery alternate on and off, which is why the single-pass pause menu always
+			// looked complete. Passes that share the camera are merged instead.
+			//
+			// A genuinely different camera means a separate view (split screen, mirrors), and
+			// those must still be dropped: Remix takes one camera per frame.
+			const double dx = scene->cam_x - m_scene.cam_x;
+			const double dy = scene->cam_y - m_scene.cam_y;
+			const double dz = scene->cam_z - m_scene.cam_z;
+
+			const bool same_camera = !m_scene_valid ? false :
+				(dx * dx + dy * dy + dz * dz) < 1.0
+				&& scene->pitch_deg == m_scene.pitch_deg
+				&& scene->yaw_deg == m_scene.yaw_deg
+				&& scene->roll_deg == m_scene.roll_deg;
+
+			if (!same_camera) {
+				++m_captures_skipped_viewport;
+				return;
+			}
+
+			++m_captures_merged_pass;
+		}
+
+		for (int32_t i = 0; i < scene->object_count; ++i)
 		{
 			const auto obj = objects[i];
 			if (!obj || !obj->mesh) {
+				++m_obj_no_mesh;
 				continue;
 			}
 
 			const auto mesh = obj->mesh;
 			if (mesh->vertex_count <= 0 || mesh->vertex_count > MAX_SANE_VERTICES
 				|| mesh->face_count <= 0 || mesh->face_count > MAX_SANE_FACES) {
+				++m_obj_insane_counts;
 				continue;
 			}
 
-			if (const auto geo = geometry_for(dev, mesh); geo && geo->triangle_count) {
+			const auto geo = geometry_for(dev, mesh);
+			if (!geo || !geo->triangle_count) {
+				++m_obj_extract_failed;
+			}
+
+			if (geo && geo->triangle_count) {
 				m_queue.push_back({ geo, build_world(obj), obj->tex_page });
 			}
 		}
@@ -555,10 +679,13 @@ namespace comp
 		{
 			shared::common::log("Ignition", std::format(
 				"captures={} (noScene={} noDevice={} skippedViewport={}) endScenes={} submits={} "
-				"lastDraws={} lastVerts={} meshes={} tex(built={} pages={} misses={}) lastDrawErr=0x{:08X}",
+				"lastDraws={} lastVerts={} meshes={} tex(built={} pages={} miss={} oob={} unset={} missIds={}) fail(vb={} tex={} noMesh={} insane={} extract={}) lastDrawErr=0x{:08X}",
 				m_captures, m_captures_no_scene, m_captures_no_device, m_captures_skipped_viewport,
 				m_end_scenes, m_submits, m_last_draws, m_last_vertices, m_geometry.size(),
 				m_textures_built, m_texture_pages.size(), m_texture_misses,
+				m_tex_index_oob, m_tex_entry_unset, m_missing_ids.size(),
+				m_vb_create_failed, m_tex_create_failed, m_obj_no_mesh, m_obj_insane_counts,
+				m_obj_extract_failed, m_captures_merged_pass,
 				static_cast<uint32_t>(m_last_draw_error)),
 				shared::common::LOG_TYPE::LOG_TYPE_DEFAULT, true);
 		}
@@ -572,7 +699,11 @@ namespace comp
 
 		m_scene_valid = false;
 		m_queue.clear();
-		m_viewport_index = 0;
+
+		// Viewport counting is NOT reset here. Present is the frame boundary; resetting
+		// mid-frame lets a second RenderScene in the same frame pass as viewport 0 and replace
+		// the captured scene with a different camera, so the submitted view alternates between
+		// frames and motion vectors never settle.
 	}
 
 	void ignition_inject::ensure_white_texture(IDirect3DDevice9* dev)
@@ -642,6 +773,8 @@ namespace comp
 		dev->SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE);
 		dev->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
 		dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+		dev->SetRenderState(D3DRS_ALPHAREF, 0);
+		dev->SetRenderState(D3DRS_ALPHAFUNC, D3DCMP_GREATER);
 		// Ignition picks its winding at runtime from the sign of scene->zoom, so neither
 		// winding can be assumed here.
 		dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
@@ -662,6 +795,13 @@ namespace comp
 		dev->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP);
 		dev->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_WRAP);
 
+		// Without these we inherit whatever nGlide last bound, which is point sampling -- the
+		// software-renderer look. These are 256x256 pages stretched over large track polygons,
+		// so the filter choice is very visible.
+		dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+		dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+		dev->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+
 		// Stale bindings from the Glide path would otherwise be captured as this geometry's
 		// material by Remix.
 		for (DWORD stage = 1; stage < 8; ++stage) {
@@ -679,7 +819,16 @@ namespace comp
 
 			for (const auto& part : inst.geometry->parts)
 			{
-				dev->SetTexture(0, texture_for(dev, game::resolve_texture_id(part.tex_sel, inst.tex_page)));
+				game::tex_resolve why{};
+				const int32_t tex_id = game::resolve_texture_id(part.tex_sel, inst.tex_page, why);
+				if (why == game::tex_resolve::index_out_of_range) ++m_tex_index_oob;
+				else if (why == game::tex_resolve::table_entry_unset) ++m_tex_entry_unset;
+
+				dev->SetTexture(0, texture_for(dev, tex_id));
+
+				// Palette index 0 is written with alpha 0. Chroma-keyed faces discard it;
+				// opaque faces keep drawing it black, exactly as the game does.
+				dev->SetRenderState(D3DRS_ALPHATESTENABLE, part.chroma_keyed ? TRUE : FALSE);
 
 				const HRESULT hr = dev->DrawPrimitive(D3DPT_TRIANGLELIST,
 					part.first_triangle * 3, part.triangle_count);

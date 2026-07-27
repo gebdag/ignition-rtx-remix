@@ -100,6 +100,7 @@ namespace comp
 		struct mesh_part
 		{
 			int32_t tex_sel;
+			bool chroma_keyed;      // palette index 0 is cut out rather than drawn black
 			uint32_t first_triangle;
 			uint32_t triangle_count;
 		};
@@ -136,6 +137,13 @@ namespace comp
 		// own guTexSource call would have received.
 		IDirect3DTexture9* texture_for(IDirect3DDevice9* dev, int32_t tex_id);
 
+		// Debug aid gated by [Ignition] DumpTextures: writes the raw source page, the remap
+		// table and the format flag so the encoding can be settled from data.
+		void dump_texture_debug(int32_t tex_id, const uint8_t* src);
+
+		// SYS.COL, loaded once. The uploaded pages are palette indices, not colour.
+		void ensure_palette();
+
 		void ensure_white_texture(IDirect3DDevice9* dev);
 		void evict_stale_geometry();
 		void release_all();
@@ -155,6 +163,23 @@ namespace comp
 		std::unordered_map<int32_t, IDirect3DTexture9*> m_textures;
 		uint32_t m_textures_built = 0;
 		uint32_t m_texture_misses = 0;
+
+		// Why faces fall back to white: an index past the 512-entry table, a table slot the game
+		// never filled, or an id whose upload we never saw.
+		uint32_t m_tex_index_oob = 0;
+		uint32_t m_tex_entry_unset = 0;
+		std::set<int32_t> m_missing_ids;
+		uint32_t m_debug_dumps = 0;
+
+		uint32_t m_palette[256]{};
+		bool m_palette_loaded = false;
+
+		// Silent failure paths that would otherwise look identical to "the geometry vanished".
+		uint32_t m_vb_create_failed = 0;
+		uint32_t m_tex_create_failed = 0;
+		uint32_t m_obj_no_mesh = 0;
+		uint32_t m_obj_insane_counts = 0;
+		uint32_t m_obj_extract_failed = 0;
 
 
 		uint32_t m_viewport_index = 0;
@@ -176,6 +201,7 @@ namespace comp
 		uint32_t m_captures_no_device = 0;
 		uint32_t m_captures_no_scene = 0;
 		uint32_t m_captures_skipped_viewport = 0;
+		uint32_t m_captures_merged_pass = 0;
 		uint32_t m_end_scenes = 0;
 		uint32_t m_submits = 0;
 		uint32_t m_presents = 0;

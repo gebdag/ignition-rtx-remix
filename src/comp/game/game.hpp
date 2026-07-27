@@ -64,12 +64,21 @@ namespace comp::game
 	constexpr uint32_t TEX_TABLE_ENTRIES = 512u;
 	constexpr int32_t TEX_ID_INVALID = -1;
 
-	inline int32_t resolve_texture_id(const int32_t tex_sel, const int32_t tex_page) {
+	// Why a face failed to resolve to a texture, so "it went white" can be diagnosed instead
+	// of guessed at.
+	enum class tex_resolve : uint8_t { ok, index_out_of_range, table_entry_unset };
+
+	inline int32_t resolve_texture_id(const int32_t tex_sel, const int32_t tex_page,
+	                                  tex_resolve& why) {
 		const uint32_t index = static_cast<uint32_t>(tex_sel >> 16) + tex_page * 0x20u;
 		if (index >= TEX_TABLE_ENTRIES) {
+			why = tex_resolve::index_out_of_range;
 			return TEX_ID_INVALID;
 		}
-		return reinterpret_cast<const int32_t*>(rebase(ADDR_g_texTable))[index];
+
+		const int32_t id = reinterpret_cast<const int32_t*>(rebase(ADDR_g_texTable))[index];
+		why = (id == TEX_ID_INVALID) ? tex_resolve::table_entry_unset : tex_resolve::ok;
+		return id;
 	}
 
 	// The fused projection*view 3x3 the game itself uses, fixed point 16.16. We do NOT feed

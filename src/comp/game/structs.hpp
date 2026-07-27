@@ -128,4 +128,21 @@ namespace comp::game
 	inline bool face_is_decal(const uint32_t op) {
 		return op == 0x16 || op == 0x17 || op == 0x19;
 	}
+
+	// Whether the face is drawn with the Glide chroma key on, i.e. palette index 0 is cut out
+	// rather than drawn black.
+	//
+	// The rasterizers these opcodes reach (0x004523E0, 0x00452730, 0x00452A90, 0x00452DF0,
+	// 0x004530C0, 0x00453390, 0x00453930, 0x00453C10, 0x00453F00) all bracket their draw with
+	// grChromakeyMode(1) / grChromakeyValue(g_colorTable[0]) / grChromakeyMode(0). The
+	// rasterizer for 0x11 and 0x15 (0x00452070) does not, so those stay opaque.
+	inline bool face_is_chroma_keyed(const uint32_t op) {
+		switch (op) {
+		case 0x12: case 0x13: case 0x16:
+		case 0x17: case 0x18: case 0x19:
+			return true;
+		default:
+			return false;
+		}
+	}
 }
