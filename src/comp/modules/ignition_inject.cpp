@@ -732,13 +732,15 @@ namespace comp
 			{
 				const double secs = static_cast<double>(now - m_rate_window_start) / 1000.0;
 				shared::common::log("IgnRate", std::format(
-					"presents/s={:.1f} captures/s={:.1f} (logic is fixed 36 Hz)",
+					"presents/s={:.1f} avgSubmit={:.2f}ms (logic is fixed 36 Hz; "
+					"submit is our own cost, the rest is game + nGlide + Remix)",
 					(m_presents - m_rate_presents) / secs,
-					(m_captures - m_rate_captures) / secs),
+					m_submit_ms_total / (m_presents - m_rate_presents ? m_presents - m_rate_presents : 1)),
 					shared::common::LOG_TYPE::LOG_TYPE_DEFAULT, true);
 				m_rate_window_start = now;
 				m_rate_presents = m_presents;
 				m_rate_captures = m_captures;
+				m_submit_ms_total = 0.0;
 			}
 		}
 
@@ -840,10 +842,20 @@ namespace comp
 
 		// nGlide owns the device for the rest of the frame, so every state this replay
 		// touches is captured and put back afterwards.
-		IDirect3DStateBlock9* saved = nullptr;
-		if (FAILED(dev->CreateStateBlock(D3DSBT_ALL, &saved))) {
+		// Create the state block once and re-record it each frame. CreateStateBlock(D3DSBT_ALL)
+		// allocates and snapshots the entire device state; doing that per frame is expensive
+		// enough to show up in frame time on its own.
+		if (!m_state_block) {
+			if (FAILED(dev->CreateStateBlock(D3DSBT_ALL, &m_state_block)) || !m_state_block) {
+				return;
+			}
+		}
+		else if (FAILED(m_state_block->Capture())) {
 			return;
 		}
+
+		LARGE_INTEGER submit_begin{};
+		QueryPerformanceCounter(&submit_begin);
 
 		// nGlide renders into an offscreen target and blits it to the back buffer once per
 		// frame (the census shows exactly one StretchRect and three SetRenderTarget calls per
@@ -936,8 +948,13 @@ namespace comp
 		}
 		s_injecting = false;
 
-		saved->Apply();
-		saved->Release();
+		m_state_block->Apply();
+
+		LARGE_INTEGER submit_end{}, freq{};
+		QueryPerformanceCounter(&submit_end);
+		QueryPerformanceFrequency(&freq);
+		m_submit_ms_total += static_cast<double>(submit_end.QuadPart - submit_begin.QuadPart)
+			* 1000.0 / static_cast<double>(freq.QuadPart);
 
 		if (!m_logged_first_submit)
 		{

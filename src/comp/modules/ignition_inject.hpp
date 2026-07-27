@@ -208,6 +208,10 @@ namespace comp
 		uint64_t m_rate_window_start = 0;
 		uint32_t m_rate_presents = 0;
 		uint32_t m_rate_captures = 0;
+		double m_submit_ms_total = 0.0;
+
+		// Recorded once and re-captured per frame rather than rebuilt.
+		IDirect3DStateBlock9* m_state_block = nullptr;
 		HRESULT m_last_draw_error = S_OK;
 		bool m_logged_first_submit = false;
 	};
