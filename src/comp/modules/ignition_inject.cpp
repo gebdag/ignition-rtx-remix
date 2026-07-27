@@ -881,7 +881,9 @@ namespace comp
 		{
 			shared::common::log("Ignition", std::format(
 				"captures={} (noScene={} noDevice={} skippedViewport={}) endScenes={} submits={} "
-				"lastDraws={} lastVerts={} meshes={} tex(built={} pages={} miss={} oob={} unset={} missIds={}) fail(vb={} tex={} noMesh={} insane={} extract={}) lastDrawErr=0x{:08X}",
+				"lastDraws={} lastVerts={} meshes={} tex(built={} pages={} miss={} oob={} unset={} missIds={}) "
+				"fail(vb={} tex={} noMesh={} insane={} extract={}) merged={} "
+				"lists(world={} dropped={} other={}) lastDrawErr=0x{:08X}",
 				m_captures, m_captures_no_scene, m_captures_no_device, m_captures_skipped_viewport,
 				m_end_scenes, m_submits, m_last_draws, m_last_vertices, m_geometry.size(),
 				m_textures_built, m_texture_pages.size(), m_texture_misses,
