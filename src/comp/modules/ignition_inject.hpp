@@ -144,6 +144,9 @@ namespace comp
 		// SYS.COL, loaded once. The uploaded pages are palette indices, not colour.
 		void ensure_palette();
 
+		// Lowers the game's once-per-36 Hz-tick render gate.
+		static void patch_render_rate();
+
 		void ensure_white_texture(IDirect3DDevice9* dev);
 		void evict_stale_geometry();
 		void release_all();

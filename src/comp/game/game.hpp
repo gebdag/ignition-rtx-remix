@@ -40,6 +40,25 @@ namespace comp::game
 	constexpr uint32_t ADDR_TransformAllObjects = 0x0044D020u;
 	typedef void(__cdecl* TransformAllObjects_t)();
 
+	// Render pacing. The game refuses to draw unless a full 36 Hz tick has elapsed:
+	//
+	//   FUN_0041D450  local = now/27.7778 - last;  if (1.0 <= local) { last = now/27.7778; ... }
+	//                 returns local, so < 1.0 while inside a tick
+	//   FUN_004116A0  dVar1 = FUN_0041D450(); if (dVar1 < 1.0) { idle } else { update + render }
+	//
+	// Both compare against the *shared* 1.0 at 0x0046D458, which 21 other instructions also
+	// use -- so the value cannot be changed. Instead these two instructions
+	// (fcomp qword ptr [0x46D458], encoded DC 1D + disp32) get their operand redirected to a
+	// private constant.
+	//
+	// Lowering the gate is safe for game speed because FUN_0041D450 stores the true current
+	// time and returns the real elapsed fraction: crossing at 0.5 yields dVar1 = 0.5, so half
+	// a tick of movement for half a tick of real time. Changing the 27.7778 period instead
+	// would double dVar1 for the same elapsed time and run the game fast.
+	constexpr uint32_t ADDR_RenderGateCmp_Delta = 0x0041D47Du;
+	constexpr uint32_t ADDR_RenderGateCmp_Tick = 0x00411820u;
+	constexpr uint8_t FCOMP_M64_OPCODE[2] = { 0xDC, 0x1D };
+
 	// The per-pass visibility filter. Objects carry a tag at +0x24; a pass includes an object
 	// when the tag is 0 or equals this value.
 	constexpr uint32_t ADDR_g_visibilityFilter = 0x00622E84u;

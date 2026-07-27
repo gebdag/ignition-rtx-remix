@@ -96,6 +96,9 @@ namespace comp
 
 	namespace
 	{
+		// Must outlive the patched instructions; they reference it directly.
+		double s_render_gate = 1.0;
+
 		bool s_smooth_normals = true;
 		float s_smooth_cos_threshold = 0.5f;   // 60 degrees
 
@@ -106,6 +109,44 @@ namespace comp
 			const float deg = cfg.get_float("Ignition", "SmoothAngleDegrees", 60.0f);
 			s_smooth_cos_threshold = cosf(deg * 3.14159265f / 180.0f);
 		}
+	}
+
+	// Redirects the two render-gate comparisons at their instruction operands, so the game
+	// draws more than once per 36 Hz logic tick. See ADDR_RenderGateCmp_* for why this is the
+	// safe lever and the tick period is not.
+	void ignition_inject::patch_render_rate()
+	{
+		const float mult = shared::common::config::get().get_float("Ignition", "RenderRateMultiplier", 1.0f);
+		if (mult <= 1.0f) {
+			return;
+		}
+
+		s_render_gate = 1.0 / static_cast<double>(mult);
+
+		for (const uint32_t site : { game::ADDR_RenderGateCmp_Delta, game::ADDR_RenderGateCmp_Tick })
+		{
+			auto* code = reinterpret_cast<uint8_t*>(game::rebase(site));
+			if (code[0] != game::FCOMP_M64_OPCODE[0] || code[1] != game::FCOMP_M64_OPCODE[1]) {
+				shared::common::log("IgnRate", std::format(
+					"render gate at 0x{:08X} is not the expected fcomp ({:02X} {:02X}) - not patching",
+					site, code[0], code[1]), shared::common::LOG_TYPE::LOG_TYPE_ERROR, true);
+				return;
+			}
+		}
+
+		for (const uint32_t site : { game::ADDR_RenderGateCmp_Delta, game::ADDR_RenderGateCmp_Tick })
+		{
+			auto* operand = reinterpret_cast<uint32_t*>(game::rebase(site) + 2);
+			DWORD prot = 0;
+			if (VirtualProtect(operand, sizeof(uint32_t), PAGE_EXECUTE_READWRITE, &prot)) {
+				*operand = reinterpret_cast<uint32_t>(&s_render_gate);
+				VirtualProtect(operand, sizeof(uint32_t), prot, &prot);
+			}
+		}
+
+		shared::common::log("IgnRate", std::format(
+			"render gate lowered to {:.3f} ticks -- up to {:.0f} fps, logic still 36 Hz",
+			s_render_gate, 36.0 * mult), shared::common::LOG_TYPE::LOG_TYPE_GREEN, true);
 	}
 
 	bool ignition_inject::suppress_game_raster()
@@ -127,6 +168,7 @@ namespace comp
 		p_this = this;
 		m_queue.reserve(256);
 		load_smoothing_settings();
+		patch_render_rate();
 
 		// 0x0044D020 tail-calls 0x0044D640 for the focal range the game actually uses, so
 		// hooking the former covers both transform paths.
