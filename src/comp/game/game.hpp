@@ -15,17 +15,34 @@ namespace comp::game
 	// --------------
 	// game functions
 
-	// RenderScene -- the entire 3D frame for one viewport: transform, emit, flush.
-	// Called from 0x00409BC0 (menu, which is genuine 3D) and twice from 0x00435E80
-	// (race, once per split-screen viewport). This is the capture point: on entry the
-	// scene and object list are fully populated and nothing has been projected yet.
+	// RenderScene -- one full pass of the 3D world:
+	//     0x0044A969  call 0x0044BE30  BuildObjectList  (streams objects around the camera)
+	//     0x0044A97A  call 0x0044D020  TransformAllObjects
+	//     0x0044A98C  call 0x0044E8D0  EmitAllFaces
+	//     0x0044A99E  call 0x0044B770  FlushDepthBuckets
+	//
+	// The game runs this several times per frame, setting the visibility filter DAT_00622E84
+	// immediately before each call (0x00436FFC, 0x00437288). Every pass draws into the same
+	// viewport, so together they form one image.
 	constexpr uint32_t ADDR_RenderScene = 0x0044A910u;
-	typedef void(__cdecl* RenderScene_t)();
 
-	// TransformAllObjects. 0x44D020 tests focal_x <= 0xFA and otherwise tail-calls 0x44D640,
-	// so hooking 0x44D020 alone covers both paths. Live focal_x is 253 (menu) / 425 (race),
-	// meaning 0x44D640 is what actually executes -- but we never need to hook it directly.
+	// BuildObjectList -- clears scene->object_count and refills g_objectList from a grid
+	// neighbourhood around scene->cam/yaw, filtered by DAT_00622E84 (0 = everything, otherwise
+	// only objects whose tag at +0x24 is 0 or matches).
+	constexpr uint32_t ADDR_BuildObjectList = 0x0044BE30u;
+
+	// TransformAllObjects -- the capture point. By here BuildObjectList has run for THIS pass,
+	// so the object list is current, and nothing has been projected yet. Capturing any earlier
+	// (at RenderScene entry) reads the previous pass's list.
+	//
+	// 0x44D020 tests focal_x <= 0xFA and otherwise tail-calls 0x44D640, so hooking it covers
+	// both transform paths. Live focal_x is 253 (menu) / 425 (race).
 	constexpr uint32_t ADDR_TransformAllObjects = 0x0044D020u;
+	typedef void(__cdecl* TransformAllObjects_t)();
+
+	// The per-pass visibility filter. Objects carry a tag at +0x24; a pass includes an object
+	// when the tag is 0 or equals this value.
+	constexpr uint32_t ADDR_g_visibilityFilter = 0x00622E84u;
 
 	// Walks each object's variable-stride face stream, dispatching through g_faceDispatch.
 	// Only needed if we ever want the game's own per-face material resolution.

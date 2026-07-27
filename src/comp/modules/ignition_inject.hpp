@@ -66,9 +66,9 @@ namespace comp
 		// Called from the proxy's Present; logs and resets the census.
 		void on_present();
 
-		// Called around the game's RenderScene, which runs during game logic.
+		// Called from the TransformAllObjects detour, once the object list has been streamed
+		// for this pass and before anything is projected.
 		void capture_scene();
-		void finish_scene();
 
 		// Called from the proxy's BeginScene, immediately after the real BeginScene succeeds.
 		//

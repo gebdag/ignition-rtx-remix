@@ -12,7 +12,7 @@ namespace comp
 	{
 		using namespace game;
 
-		game::RenderScene_t o_render_scene = nullptr;
+		game::TransformAllObjects_t o_transform_all_objects = nullptr;
 		game::UploadTexture_t o_upload_texture = nullptr;
 
 		// The game hands Glide a mipmap id; the same id is what g_texTable stores and what our
@@ -28,19 +28,26 @@ namespace comp
 			return tex_id;
 		}
 
-		void __cdecl hk_render_scene()
+		// Capture at TransformAllObjects rather than at RenderScene, because RenderScene builds
+		// the object list *inside* itself:
+		//
+		//     0x0044A969  call FUN_0044BE30          <- streams the object list around the camera
+		//     0x0044A97A  call TransformAllObjects   <- we hook here
+		//     0x0044A98C  call EmitAllFaces
+		//     0x0044A99E  call FlushDepthBuckets
+		//
+		// Capturing at RenderScene entry read the list left over from the *previous* pass. The
+		// game runs several passes per frame, each with a different visibility filter in
+		// DAT_00622E84 (set at 0x00436FFC and 0x00437288 immediately before each call), so the
+		// stale list belonged to some other car's streamed neighbourhood -- the world appeared
+		// to follow the AI cars instead of the player.
+		void __cdecl hk_transform_all_objects()
 		{
-			const auto self = ignition_inject::get();
-
-			if (self) {
+			if (const auto self = ignition_inject::get()) {
 				self->capture_scene();
 			}
 
-			o_render_scene();
-
-			if (self) {
-				self->finish_scene();
-			}
+			o_transform_all_objects();
 		}
 
 		constexpr D3DVERTEXELEMENT9 INJECT_DECL[] = {
@@ -106,16 +113,18 @@ namespace comp
 		p_this = this;
 		m_queue.reserve(256);
 
-		if (shared::utils::hook::detour(game::rebase(game::ADDR_RenderScene), hk_render_scene,
-			reinterpret_cast<void**>(&o_render_scene)))
+		// 0x0044D020 tail-calls 0x0044D640 for the focal range the game actually uses, so
+		// hooking the former covers both transform paths.
+		if (shared::utils::hook::detour(game::rebase(game::ADDR_TransformAllObjects),
+			hk_transform_all_objects, reinterpret_cast<void**>(&o_transform_all_objects)))
 		{
-			shared::common::log("Ignition", "Hooked RenderScene - object-space injection armed.",
+			shared::common::log("Ignition", "Hooked TransformAllObjects - object-space injection armed.",
 				shared::common::LOG_TYPE::LOG_TYPE_GREEN, true);
 		}
 		else
 		{
-			shared::common::log("Ignition", std::format("failed to hook RenderScene @ 0x{:08X}",
-				game::ADDR_RenderScene), shared::common::LOG_TYPE::LOG_TYPE_ERROR, true);
+			shared::common::log("Ignition", std::format("failed to hook TransformAllObjects @ 0x{:08X}",
+				game::ADDR_TransformAllObjects), shared::common::LOG_TYPE::LOG_TYPE_ERROR, true);
 		}
 
 		if (!shared::utils::hook::detour(game::rebase(game::ADDR_UploadTexture), hk_upload_texture,
@@ -640,12 +649,6 @@ namespace comp
 	// BeginScene/EndScene pair later, when it flushes buffered Glide triangles -- which is why
 	// submitting inside that window meant drawing into its private surface, where Remix never
 	// looks. The one thing missing here is an open scene, so we open our own.
-	// The game's scene walk is finished but the device is not inside a BeginScene/EndScene pair
-	// here, so the queue is held until the proxy's BeginScene, which is.
-	void ignition_inject::finish_scene()
-	{
-	}
-
 	void ignition_inject::on_present()
 	{
 		++m_presents;
