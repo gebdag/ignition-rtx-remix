@@ -59,6 +59,23 @@ namespace comp::game
 	constexpr uint32_t ADDR_RenderGateCmp_Tick = 0x00411820u;
 	constexpr uint8_t FCOMP_M64_OPCODE[2] = { 0xDC, 0x1D };
 
+	// RunDisplayList(ctx) -- walks a display list and turns it into Glide calls. Called for the
+	// world right after each RenderScene, and separately for HUD and menu overlays:
+	//
+	//   world : 0x00437014, 0x00437298   (return addresses 0x00437019, 0x0043729D)
+	//   other : 0x00409D1E, 0x00409DF7, 0x0043D957, 0x0043EA1E, 0x0043FE6E
+	//
+	// Skipping the world calls stops those triangles being emitted at all, which is the only
+	// reliable place to separate world from HUD: nGlide buffers Glide calls and flushes them at
+	// swap, so nothing flagged during the game's own frame survives to the D3D draws. Filtering
+	// on depth state does not work either -- the game depth-sorts into buckets and never uses a
+	// depth buffer, so ZENABLE is off for the world as well as the HUD.
+	constexpr uint32_t ADDR_RunDisplayList = 0x00450EC0u;
+	typedef void(__cdecl* RunDisplayList_t)(void* ctx);
+
+	constexpr uint32_t RET_WorldDisplayList_A = 0x00437019u;
+	constexpr uint32_t RET_WorldDisplayList_B = 0x0043729Du;
+
 	// The per-pass visibility filter. Objects carry a tag at +0x24; a pass includes an object
 	// when the tag is 0 or equals this value.
 	constexpr uint32_t ADDR_g_visibilityFilter = 0x00622E84u;

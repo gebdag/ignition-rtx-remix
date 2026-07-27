@@ -43,6 +43,11 @@ namespace comp
 		// it can categorise and tag.
 		static bool should_drop_game_draw();
 
+		// Drops the world display list at the source, before nGlide ever sees it, so the HUD
+		// and menu lists still render normally and reach Remix as taggable UI draws.
+		static bool suppress_world_raster();
+		static inline uint32_t s_world_lists_dropped = 0;
+
 		// nGlide composites its whole frame offscreen and blits it to the back buffer with a
 		// single StretchRect. That blit lands on top of whatever Remix produced, so while it
 		// runs the path traced image can never be seen. Suppressing just the blit is far more

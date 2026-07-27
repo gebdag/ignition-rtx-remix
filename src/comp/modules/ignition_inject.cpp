@@ -14,6 +14,24 @@ namespace comp
 
 		game::TransformAllObjects_t o_transform_all_objects = nullptr;
 		game::UploadTexture_t o_upload_texture = nullptr;
+		game::RunDisplayList_t o_run_display_list = nullptr;
+
+		// Drops the world display list before it becomes Glide calls, leaving the HUD and menu
+		// lists untouched. Identified by return address because the same function serves both.
+		void __cdecl hk_run_display_list(void* ctx)
+		{
+			const auto ret = reinterpret_cast<uint32_t>(_ReturnAddress());
+
+			if (ignition_inject::suppress_world_raster()
+				&& (ret == game::rebase(game::RET_WorldDisplayList_A)
+					|| ret == game::rebase(game::RET_WorldDisplayList_B)))
+			{
+				++ignition_inject::s_world_lists_dropped;
+				return;
+			}
+
+			o_run_display_list(ctx);
+		}
 
 		// The game hands Glide a mipmap id; the same id is what g_texTable stores and what our
 		// per-face lookup resolves to, so capturing the pair here is all the correlation needed.
@@ -156,6 +174,13 @@ namespace comp
 		return on;
 	}
 
+	bool ignition_inject::suppress_world_raster()
+	{
+		static const bool on =
+			shared::common::config::get().get_bool("Ignition", "SuppressWorldRaster", true);
+		return on;
+	}
+
 	bool ignition_inject::should_drop_game_draw()
 	{
 		if (!suppress_game_raster()) {
@@ -204,6 +229,13 @@ namespace comp
 		{
 			shared::common::log("Ignition", std::format("failed to hook UploadTexture @ 0x{:08X}",
 				game::ADDR_UploadTexture), shared::common::LOG_TYPE::LOG_TYPE_ERROR, true);
+		}
+
+		if (!shared::utils::hook::detour(game::rebase(game::ADDR_RunDisplayList), hk_run_display_list,
+			reinterpret_cast<void**>(&o_run_display_list)))
+		{
+			shared::common::log("Ignition", std::format("failed to hook RunDisplayList @ 0x{:08X}",
+				game::ADDR_RunDisplayList), shared::common::LOG_TYPE::LOG_TYPE_ERROR, true);
 		}
 	}
 
