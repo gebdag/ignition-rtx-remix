@@ -205,6 +205,9 @@ namespace comp
 		uint32_t m_end_scenes = 0;
 		uint32_t m_submits = 0;
 		uint32_t m_presents = 0;
+		uint64_t m_rate_window_start = 0;
+		uint32_t m_rate_presents = 0;
+		uint32_t m_rate_captures = 0;
 		HRESULT m_last_draw_error = S_OK;
 		bool m_logged_first_submit = false;
 	};

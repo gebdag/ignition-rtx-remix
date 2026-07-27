@@ -94,6 +94,20 @@ namespace comp
 		}
 	}
 
+	namespace
+	{
+		bool s_smooth_normals = true;
+		float s_smooth_cos_threshold = 0.5f;   // 60 degrees
+
+		void load_smoothing_settings()
+		{
+			auto& cfg = shared::common::config::get();
+			s_smooth_normals = cfg.get_bool("Ignition", "SmoothNormals", true);
+			const float deg = cfg.get_float("Ignition", "SmoothAngleDegrees", 60.0f);
+			s_smooth_cos_threshold = cosf(deg * 3.14159265f / 180.0f);
+		}
+	}
+
 	bool ignition_inject::suppress_game_raster()
 	{
 		static const bool on =
@@ -112,6 +126,7 @@ namespace comp
 	{
 		p_this = this;
 		m_queue.reserve(256);
+		load_smoothing_settings();
 
 		// 0x0044D020 tail-calls 0x0044D640 for the focal range the game actually uses, so
 		// hooking the former covers both transform paths.
@@ -325,7 +340,14 @@ namespace comp
 		parts.clear();
 
 		// Gathered first, then sorted by selector so that each texture becomes one draw.
-		struct pending_tri { int32_t tex_sel; bool chroma_keyed; ffp_vertex v[3]; };
+		struct pending_tri
+		{
+			int32_t tex_sel;
+			bool chroma_keyed;
+			int32_t src_index[3];             // mesh vertex indices, for sharing normals
+			float area_nx, area_ny, area_nz;  // un-normalised face normal (length == 2*area)
+			ffp_vertex v[3];
+		};
 		std::vector<pending_tri> tris;
 
 		const uint8_t* cur = face_base;
@@ -369,22 +391,26 @@ namespace comp
 						tri[k].v = static_cast<float>(uv[k][1]) / 65536.0f;
 					}
 
-					// Flat normal. Splitting per face is forced by the per-face UVs anyway,
-					// so this costs nothing extra.
+					// Face normal, weighted by triangle area via the un-normalised cross
+					// product so that large faces dominate the smoothed result.
 					const float ax = tri[1].x - tri[0].x, ay = tri[1].y - tri[0].y, az = tri[1].z - tri[0].z;
 					const float bx = tri[2].x - tri[0].x, by = tri[2].y - tri[0].y, bz = tri[2].z - tri[0].z;
 					float nx = ay * bz - az * by;
 					float ny = az * bx - ax * bz;
 					float nz = ax * by - ay * bx;
 					const float len = sqrtf(nx * nx + ny * ny + nz * nz);
+
+					pending_tri pt{};
+					pt.area_nx = nx; pt.area_ny = ny; pt.area_nz = nz;
+
 					if (len > 1e-6f) { nx /= len; ny /= len; nz /= len; }
 					else { nx = 0.0f; ny = 1.0f; nz = 0.0f; }
 
 					for (auto& t : tri) { t.nx = nx; t.ny = ny; t.nz = nz; }
 
-					pending_tri pt{};
 					pt.tex_sel = f->tex_sel;
 					pt.chroma_keyed = game::face_is_chroma_keyed(op);
+					pt.src_index[0] = idx[0]; pt.src_index[1] = idx[1]; pt.src_index[2] = idx[2];
 					pt.v[0] = tri[0]; pt.v[1] = tri[1]; pt.v[2] = tri[2];
 					tris.push_back(pt);
 				}
@@ -395,6 +421,44 @@ namespace comp
 
 		if (tris.empty()) {
 			return false;
+		}
+
+		// Smooth normals across faces that share a mesh vertex.
+		//
+		// Ignition stores no normals, and the per-face UVs force a vertex split per triangle,
+		// so flat shading is what falls out naturally -- and it makes the terrain read as
+		// faceted. Accumulating the area-weighted face normals per *source* vertex index
+		// recovers the shared normal the geometry implies.
+		//
+		// A crease threshold keeps genuine hard edges hard: if a face disagrees with the
+		// accumulated normal by more than the configured angle it keeps its flat normal, so
+		// box-like scenery does not turn into a blob.
+		if (s_smooth_normals)
+		{
+			std::vector<float> acc(static_cast<size_t>(n_verts) * 3, 0.0f);
+			for (const auto& t : tris) {
+				for (const int32_t vi : t.src_index) {
+					acc[vi * 3 + 0] += t.area_nx;
+					acc[vi * 3 + 1] += t.area_ny;
+					acc[vi * 3 + 2] += t.area_nz;
+				}
+			}
+
+			for (int32_t v = 0; v < n_verts; ++v) {
+				float* n = &acc[v * 3];
+				const float l = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+				if (l > 1e-6f) { n[0] /= l; n[1] /= l; n[2] /= l; }
+			}
+
+			for (auto& t : tris) {
+				for (int k = 0; k < 3; ++k) {
+					const float* n = &acc[t.src_index[k] * 3];
+					const float d = t.v[k].nx * n[0] + t.v[k].ny * n[1] + t.v[k].nz * n[2];
+					if (d >= s_smooth_cos_threshold) {
+						t.v[k].nx = n[0]; t.v[k].ny = n[1]; t.v[k].nz = n[2];
+					}
+				}
+			}
 		}
 
 		std::stable_sort(tris.begin(), tris.end(), [](const pending_tri& a, const pending_tri& b) {
@@ -652,6 +716,31 @@ namespace comp
 	void ignition_inject::on_present()
 	{
 		++m_presents;
+
+		// The game's logic runs at a fixed 36 Hz (0x004116A0 divides elapsed milliseconds by
+		// 27.7778), but rendering is called once per main-loop iteration and nothing gates it.
+		// Measuring presents against captures tells us whether the observed 36 fps is the game
+		// or something outside it.
+		{
+			const auto now = GetTickCount64();
+			if (m_rate_window_start == 0) {
+				m_rate_window_start = now;
+				m_rate_presents = m_presents;
+				m_rate_captures = m_captures;
+			}
+			else if (now - m_rate_window_start >= 2000)
+			{
+				const double secs = static_cast<double>(now - m_rate_window_start) / 1000.0;
+				shared::common::log("IgnRate", std::format(
+					"presents/s={:.1f} captures/s={:.1f} (logic is fixed 36 Hz)",
+					(m_presents - m_rate_presents) / secs,
+					(m_captures - m_rate_captures) / secs),
+					shared::common::LOG_TYPE::LOG_TYPE_DEFAULT, true);
+				m_rate_window_start = now;
+				m_rate_presents = m_presents;
+				m_rate_captures = m_captures;
+			}
+		}
 
 		// Present is the real frame boundary, so viewport counting restarts here.
 		m_viewport_index = 0;
