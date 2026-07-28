@@ -37,8 +37,13 @@ namespace comp::game
 	};
 	static_assert(sizeof(ign_face_flat) == 0x14, "flat face record is 0x14 bytes");
 
-	// A camera-facing quad, not a triangle: one anchor vertex, a texture rectangle and a size in
-	// screen units. Recovered from emitter 0x00450860 and rasterizer 0x00452DF0.
+	// A camera-facing quad, not a triangle: one anchor vertex, a texture rectangle and a scale.
+	// Recovered from emitter 0x00450860 and rasterizer 0x00452DF0.
+	//
+	// `scale` is NOT a half extent. The rasterizer multiplies it by half the UV span
+	// (0x00452EA4: `(halfUV >> 8) * (scale >> 8)`), so one scale value produces proportionally
+	// sized quads for different sub-rectangles of a sprite sheet. Reading it as an extent makes
+	// sprites roughly 1/halfSpan too large -- eight times, for a 64x64 frame on a 256x256 page.
 	struct ign_face_sprite
 	{
 		int32_t opcode;
@@ -46,8 +51,8 @@ namespace comp::game
 		int32_t u0, v0;
 		int32_t u1, v1;
 		int32_t opacity;       // becomes the grConstantColorValue alpha
-		int32_t half_width;    // screen half extent is this * 4.0 / w
-		int32_t half_height;
+		int32_t scale_x;       // screen half extent is halfU * this * 4.0 / w
+		int32_t scale_y;
 	};
 	static_assert(sizeof(ign_face_sprite) == 0x24, "sprite record is 0x24 bytes");
 

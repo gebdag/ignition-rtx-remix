@@ -778,7 +778,7 @@ namespace comp
 			{
 				const auto f = reinterpret_cast<const game::ign_face_sprite*>(cur);
 				if (f->vertex >= 0 && f->vertex < n_verts
-					&& (f->half_width > 0 || f->half_height > 0))
+					&& (f->scale_x > 0 || f->scale_y > 0))
 				{
 					const auto& s = verts[f->vertex];
 					const float ox = static_cast<float>(s.x);
@@ -789,8 +789,8 @@ namespace comp
 					sp.x = ox * world._11 + oy * world._21 + oz * world._31 + world._41;
 					sp.y = ox * world._12 + oy * world._22 + oz * world._32 + world._42;
 					sp.z = ox * world._13 + oy * world._23 + oz * world._33 + world._43;
-					sp.half_width = f->half_width;
-					sp.half_height = f->half_height;
+					sp.scale_x = f->scale_x;
+					sp.scale_y = f->scale_y;
 					sp.u0 = static_cast<float>(f->u0) / 65536.0f;
 					sp.v0 = static_cast<float>(f->v0) / 65536.0f;
 					sp.u1 = static_cast<float>(f->u1) / 65536.0f;
@@ -1166,10 +1166,19 @@ namespace comp
 
 	// Expands the gathered sprites into camera-facing quads.
 	//
-	// The game sizes a sprite in screen space: emitter 0x00450860 computes half = value * 4.0 / w,
-	// in the same 24.8 fixed screen units as the vertex it anchors to. Undoing that against the
-	// projection we hand Remix -- half_px = W * focal / view_z with w = 4 * view_z -- leaves
-	// W = value / (256 * focal), with the depth term cancelling as it must.
+	// The game sizes a sprite in screen space, across two steps. Emitter 0x00450860 scales the
+	// record's value by the depth (`scale * 4.0 / w`), and rasterizer 0x00452DF0 then multiplies
+	// that by half the UV span, shifting both down by 8 first:
+	//
+	//     half_fixed = (halfUV >> 8) * ((scale * 4 / w) >> 8)
+	//
+	// Undoing it against the projection we hand Remix -- half_px = W * focal / view_z, screen
+	// units being 24.8 fixed, and w = 4 * view_z -- leaves
+	//
+	//     W = halfUV_fraction * scale / (256 * focal)
+	//
+	// with the depth term cancelling as it must for a world-space size. Dropping the UV term is
+	// what made the first version eight times too large for a 64x64 frame on a 256x256 page.
 	void ignition_inject::submit_sprites(IDirect3DDevice9* dev, const D3DMATRIX& view)
 	{
 		const double zoom = (m_scene.zoom != 0.0) ? fabs(m_scene.zoom) : 1.0;
@@ -1205,8 +1214,10 @@ namespace comp
 				continue;
 			}
 
-			const float hw = static_cast<float>(sp.half_width) / (256.0f * focal_x);
-			const float hh = static_cast<float>(sp.half_height) / (256.0f * focal_y);
+			const float half_u = fabsf(sp.u1 - sp.u0) * 0.5f;
+			const float half_v = fabsf(sp.v1 - sp.v0) * 0.5f;
+			const float hw = half_u * static_cast<float>(sp.scale_x) / (256.0f * focal_x);
+			const float hh = half_v * static_cast<float>(sp.scale_y) / (256.0f * focal_y);
 
 			ffp_vertex corner[4]{};
 			const float sx[4] = { -hw,  hw,  hw, -hw };
@@ -1292,12 +1303,13 @@ namespace comp
 			const auto& sp = m_sprites.front();
 			shared::common::log("IgnSprite", std::format(
 				"first sprite submit: quads={} runs={} focal=({:.0f},{:.0f}) "
-				"raw=({},{}) -> world half=({:.2f},{:.2f}) uv=({:.3f},{:.3f})-({:.3f},{:.3f}) "
-				"tex={} opacity={} blend={}",
+				"scale=({},{}) halfUV=({:.4f},{:.4f}) -> world half=({:.2f},{:.2f}) "
+				"uv=({:.3f},{:.3f})-({:.3f},{:.3f}) tex={} opacity={} blend={}",
 				m_last_sprites, runs.size(), focal_x, focal_y,
-				sp.half_width, sp.half_height,
-				static_cast<float>(sp.half_width) / (256.0f * focal_x),
-				static_cast<float>(sp.half_height) / (256.0f * focal_y),
+				sp.scale_x, sp.scale_y,
+				fabsf(sp.u1 - sp.u0) * 0.5f, fabsf(sp.v1 - sp.v0) * 0.5f,
+				fabsf(sp.u1 - sp.u0) * 0.5f * static_cast<float>(sp.scale_x) / (256.0f * focal_x),
+				fabsf(sp.v1 - sp.v0) * 0.5f * static_cast<float>(sp.scale_y) / (256.0f * focal_y),
 				sp.u0, sp.v0, sp.u1, sp.v1, sp.tex_id, sp.material.opacity,
 				static_cast<int>(sp.material.blend)),
 				shared::common::LOG_TYPE::LOG_TYPE_GREEN, true);

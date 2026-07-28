@@ -157,12 +157,12 @@ namespace comp
 		// One sprite, anchored in world space. Sprites cannot live in the per-mesh cache: they are
 		// camera-facing, so their corners depend on the view and have to be rebuilt every frame.
 		//
-		// The half extents stay in the game's own units because turning them into world units
-		// needs the focal lengths, which belong to the scene rather than to the mesh.
+		// The scales stay in the game's own units because turning them into world extents needs
+		// the focal lengths, which belong to the scene rather than to the mesh.
 		struct sprite_instance
 		{
 			float x, y, z;
-			int32_t half_width, half_height;
+			int32_t scale_x, scale_y;
 			float u0, v0, u1, v1;
 			int32_t tex_id;
 			game::face_material material;
