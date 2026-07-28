@@ -257,12 +257,7 @@ namespace comp
 	{
 		auto& page = m_texture_pages[tex_id];
 		page.pixels.assign(src, src + game::TEXTURE_PIXELS);
-
-		memset(page.used_indices, 0, sizeof(page.used_indices));
-		for (int i = 0; i < game::TEXTURE_PIXELS; ++i) {
-			const uint8_t idx = src[i];
-			page.used_indices[idx >> 6] |= (1ull << (idx & 63));
-		}
+		snapshot_palette(page.palette);
 
 		dump_texture_debug(tex_id, src);
 
@@ -316,7 +311,7 @@ namespace comp
 	//
 	// The palette is the game's live colour table, snapshotted per upload because it is per
 	// level: a single global palette matches the first track and miscolours every later one.
-	void ignition_inject::read_live_palette(uint32_t (&out)[256])
+	void ignition_inject::snapshot_palette(uint32_t (&out)[256])
 	{
 		const uint32_t* table = game::get_color_table();
 
@@ -372,100 +367,6 @@ namespace comp
 		}
 	}
 
-	// Transparent texels carry the chroma colour in RGB, which is near black. Bilinear
-	// filtering blends that into neighbouring opaque texels, and because their alpha blends
-	// too they still pass the alpha test -- so cut-outs get a dark fringe. Replacing the RGB of
-	// each transparent texel with the average of its opaque neighbours removes the fringe while
-	// leaving alpha, and therefore the cut-out shape, untouched.
-	void ignition_inject::bleed_transparent_edges(const D3DLOCKED_RECT& rect)
-	{
-		const int size = game::TEXTURE_SIZE;
-		auto at = [&](int x, int y) -> uint32_t& {
-			return reinterpret_cast<uint32_t*>(
-				static_cast<uint8_t*>(rect.pBits) + y * rect.Pitch)[x];
-		};
-
-		std::vector<uint32_t> source(static_cast<size_t>(size) * size);
-		for (int y = 0; y < size; ++y) {
-			for (int x = 0; x < size; ++x) {
-				source[static_cast<size_t>(y) * size + x] = at(x, y);
-			}
-		}
-
-		for (int y = 0; y < size; ++y)
-		{
-			for (int x = 0; x < size; ++x)
-			{
-				uint32_t& texel = at(x, y);
-				if (texel & 0xFF000000u) {
-					continue;
-				}
-
-				uint32_t r = 0, g = 0, b = 0, n = 0;
-				for (int dy = -1; dy <= 1; ++dy) {
-					for (int dx = -1; dx <= 1; ++dx) {
-						const int sx = x + dx, sy = y + dy;
-						if (sx < 0 || sy < 0 || sx >= size || sy >= size) continue;
-						const uint32_t s = source[static_cast<size_t>(sy) * size + sx];
-						if (!(s & 0xFF000000u)) continue;
-						r += (s >> 16) & 0xFF; g += (s >> 8) & 0xFF; b += s & 0xFF; ++n;
-					}
-				}
-
-				if (n) {
-					texel = ((r / n) << 16) | ((g / n) << 8) | (b / n);   // alpha stays 0
-				}
-			}
-		}
-	}
-
-	// Water and waves animate by cycling palette entries, not by re-uploading pixels. A
-	// converted texture is therefore only stale when an index it actually references changed,
-	// which keeps this to the handful of pages that animate rather than all of them.
-	void ignition_inject::refresh_animated_textures()
-	{
-		uint32_t live[256];
-		read_live_palette(live);
-
-		if (!m_palette_cache_valid) {
-			memcpy(m_palette_cache, live, sizeof(m_palette_cache));
-			m_palette_cache_valid = true;
-			return;
-		}
-
-		if (memcmp(m_palette_cache, live, sizeof(live)) == 0) {
-			return;
-		}
-
-		uint64_t changed[4]{};
-		for (uint32_t i = 0; i < 256; ++i) {
-			if (m_palette_cache[i] != live[i]) {
-				changed[i >> 6] |= (1ull << (i & 63));
-			}
-		}
-		memcpy(m_palette_cache, live, sizeof(m_palette_cache));
-
-		for (auto it = m_textures.begin(); it != m_textures.end(); )
-		{
-			const auto page = m_texture_pages.find(it->first);
-			bool affected = (page == m_texture_pages.end());
-			if (!affected) {
-				for (int w = 0; w < 4 && !affected; ++w) {
-					affected = (page->second.used_indices[w] & changed[w]) != 0;
-				}
-			}
-
-			if (affected) {
-				if (it->second) it->second->Release();
-				it = m_textures.erase(it);
-				++m_textures_reconverted;
-			}
-			else {
-				++it;
-			}
-		}
-	}
-
 	IDirect3DTexture9* ignition_inject::texture_for(IDirect3DDevice9* dev, const int32_t tex_id)
 	{
 		if (tex_id == game::TEX_ID_INVALID) {
@@ -495,10 +396,8 @@ namespace comp
 		D3DLOCKED_RECT rect{};
 		if (SUCCEEDED(tex->LockRect(0, &rect, nullptr, 0)))
 		{
-			uint32_t pal[256];
-			read_live_palette(pal);
-
 			const auto& bytes = page->second.pixels;
+			const auto& pal = page->second.palette;
 			for (int y = 0; y < game::TEXTURE_SIZE; ++y)
 			{
 				auto* dst = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(rect.pBits) + y * rect.Pitch);
@@ -506,8 +405,6 @@ namespace comp
 					dst[x] = pal[bytes[y * game::TEXTURE_SIZE + x]];
 				}
 			}
-
-			bleed_transparent_edges(rect);
 			tex->UnlockRect(0);
 		}
 
@@ -1112,7 +1009,6 @@ namespace comp
 		dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
 
 		ensure_white_texture(dev);
-		refresh_animated_textures();
 		dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
 		dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
 		dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
