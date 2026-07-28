@@ -125,6 +125,8 @@ namespace comp
 		struct mesh_part
 		{
 			int32_t tex_sel;
+			uint32_t colour;        // 0x00RRGGBB modulated over the texture; white when textured
+			bool textured;          // false for flat-shaded faces, which get the white texture
 			game::face_material material;
 			uint32_t first_triangle;
 			uint32_t triangle_count;
@@ -152,8 +154,31 @@ namespace comp
 			int32_t tex_page;
 		};
 
+		// One sprite, anchored in world space. Sprites cannot live in the per-mesh cache: they are
+		// camera-facing, so their corners depend on the view and have to be rebuilt every frame.
+		//
+		// The half extents stay in the game's own units because turning them into world units
+		// needs the focal lengths, which belong to the scene rather than to the mesh.
+		struct sprite_instance
+		{
+			float x, y, z;
+			int32_t half_width, half_height;
+			float u0, v0, u1, v1;
+			int32_t tex_id;
+			game::face_material material;
+		};
+
 		void submit(IDirect3DDevice9* dev);
-		static void apply_material(IDirect3DDevice9* dev, const game::face_material& mat);
+		static void apply_material(IDirect3DDevice9* dev, const game::face_material& mat,
+		                           uint32_t colour);
+
+		// Gathers the object's sprite records into m_sprites, with the anchor already in world
+		// space. Called per object per capture, since sprite records animate.
+		void collect_sprites(const game::ign_object* obj, const D3DMATRIX& world);
+
+		// Expands m_sprites into camera-facing quads and draws them. Separate from the mesh path
+		// because the geometry is per-frame and the world transform is identity.
+		void submit_sprites(IDirect3DDevice9* dev, const D3DMATRIX& view);
 		bool build_view(D3DMATRIX& out) const;
 		bool build_projection(D3DMATRIX& out) const;
 		static D3DMATRIX build_world(const game::ign_object* obj);
@@ -187,6 +212,12 @@ namespace comp
 
 		std::vector<queued_instance> m_queue;
 		std::unordered_map<game::ign_mesh*, mesh_geometry> m_geometry;
+
+		std::vector<sprite_instance> m_sprites;
+		std::vector<ffp_vertex> m_sprite_vertices;
+		IDirect3DVertexBuffer9* m_sprite_buffer = nullptr;
+		uint32_t m_sprite_buffer_verts = 0;
+		uint32_t m_last_sprites = 0;
 
 		// Snapshot of the scene taken at capture time; the game mutates it during the call.
 		game::ign_scene m_scene{};
@@ -263,5 +294,6 @@ namespace comp
 		IDirect3DStateBlock9* m_state_block = nullptr;
 		HRESULT m_last_draw_error = S_OK;
 		bool m_logged_first_submit = false;
+		bool m_logged_first_sprites = false;
 	};
 }

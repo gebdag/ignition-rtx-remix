@@ -472,6 +472,9 @@ namespace comp
 		m_textures.clear();
 		m_texture_pages.clear();
 
+		if (m_sprite_buffer) { m_sprite_buffer->Release(); m_sprite_buffer = nullptr; }
+		m_sprite_buffer_verts = 0;
+
 		if (m_white_texture) { m_white_texture->Release(); m_white_texture = nullptr; }
 		if (m_vertex_decl) { m_vertex_decl->Release(); m_vertex_decl = nullptr; }
 	}
@@ -495,6 +498,8 @@ namespace comp
 		struct pending_tri
 		{
 			int32_t tex_sel;
+			uint32_t colour;
+			bool textured;
 			game::face_material material;
 			int32_t src_index[3];             // mesh vertex indices, for sharing normals
 			float area_nx, area_ny, area_nz;  // un-normalised face normal (length == 2*area)
@@ -517,54 +522,72 @@ namespace comp
 				break;    // terminator -- this model's face stream ends here
 			}
 
+			// Shared by both triangle kinds: flat faces are the textured ones with the UVs
+			// collapsed onto the white texture and a colour carried alongside instead.
+			const auto add_triangle = [&](const int32_t (&idx)[3], const int32_t (&uv)[3][2],
+			                              const int32_t tex_sel, const uint32_t colour,
+			                              const bool textured)
+			{
+				for (const int32_t v : idx) {
+					if (v < 0 || v >= n_verts) return;
+				}
+
+				ffp_vertex tri[3]{};
+				for (int k = 0; k < 3; ++k)
+				{
+					const auto& s = verts[idx[k]];
+					tri[k].x = static_cast<float>(s.x);
+					tri[k].y = static_cast<float>(-s.y);
+					tri[k].z = static_cast<float>(s.z);
+					// Observed U/V span 491..65024, so 1/65536 lands them in 0..1.
+					tri[k].u = static_cast<float>(uv[k][0]) / 65536.0f;
+					tri[k].v = static_cast<float>(uv[k][1]) / 65536.0f;
+				}
+
+				// Face normal, weighted by triangle area via the un-normalised cross
+				// product so that large faces dominate the smoothed result.
+				const float ax = tri[1].x - tri[0].x, ay = tri[1].y - tri[0].y, az = tri[1].z - tri[0].z;
+				const float bx = tri[2].x - tri[0].x, by = tri[2].y - tri[0].y, bz = tri[2].z - tri[0].z;
+				float nx = ay * bz - az * by;
+				float ny = az * bx - ax * bz;
+				float nz = ax * by - ay * bx;
+				const float len = sqrtf(nx * nx + ny * ny + nz * nz);
+
+				pending_tri pt{};
+				pt.area_nx = nx; pt.area_ny = ny; pt.area_nz = nz;
+
+				if (len > 1e-6f) { nx /= len; ny /= len; nz /= len; }
+				else { nx = 0.0f; ny = 1.0f; nz = 0.0f; }
+
+				for (auto& t : tri) { t.nx = nx; t.ny = ny; t.nz = nz; }
+
+				pt.tex_sel = tex_sel;
+				pt.colour = colour;
+				pt.textured = textured;
+				pt.material = game::face_material_for(op);
+				pt.src_index[0] = idx[0]; pt.src_index[1] = idx[1]; pt.src_index[2] = idx[2];
+				pt.v[0] = tri[0]; pt.v[1] = tri[1]; pt.v[2] = tri[2];
+				tris.push_back(pt);
+			};
+
 			if (game::face_is_textured_tri(op))
 			{
 				const auto f = reinterpret_cast<const game::ign_face_tri*>(cur);
 				const int32_t idx[3] = { f->i0, f->i1, f->i2 };
+				const int32_t uv[3][2] = { { f->u0, f->v0 }, { f->u1, f->v1 }, { f->u2, f->v2 } };
+				add_triangle(idx, uv, f->tex_sel, 0x00FFFFFFu, true);
+			}
+			else if (game::face_is_coloured_tri(op))
+			{
+				const auto f = reinterpret_cast<const game::ign_face_flat*>(cur);
+				const uint32_t entry = static_cast<uint32_t>(f->colour) & 0xFFu;
 
-				bool ok = true;
-				for (const int32_t v : idx) {
-					if (v < 0 || v >= n_verts) { ok = false; break; }
-				}
-
-				if (ok)
+				// The display-list case drops index 0 outright (0x0045105A: test cl,cl / je).
+				if (entry != 0)
 				{
-					const int32_t uv[3][2] = { { f->u0, f->v0 }, { f->u1, f->v1 }, { f->u2, f->v2 } };
-
-					ffp_vertex tri[3]{};
-					for (int k = 0; k < 3; ++k)
-					{
-						const auto& s = verts[idx[k]];
-						tri[k].x = static_cast<float>(s.x);
-						tri[k].y = static_cast<float>(-s.y);
-						tri[k].z = static_cast<float>(s.z);
-						// Observed U/V span 491..65024, so 1/65536 lands them in 0..1.
-						tri[k].u = static_cast<float>(uv[k][0]) / 65536.0f;
-						tri[k].v = static_cast<float>(uv[k][1]) / 65536.0f;
-					}
-
-					// Face normal, weighted by triangle area via the un-normalised cross
-					// product so that large faces dominate the smoothed result.
-					const float ax = tri[1].x - tri[0].x, ay = tri[1].y - tri[0].y, az = tri[1].z - tri[0].z;
-					const float bx = tri[2].x - tri[0].x, by = tri[2].y - tri[0].y, bz = tri[2].z - tri[0].z;
-					float nx = ay * bz - az * by;
-					float ny = az * bx - ax * bz;
-					float nz = ax * by - ay * bx;
-					const float len = sqrtf(nx * nx + ny * ny + nz * nz);
-
-					pending_tri pt{};
-					pt.area_nx = nx; pt.area_ny = ny; pt.area_nz = nz;
-
-					if (len > 1e-6f) { nx /= len; ny /= len; nz /= len; }
-					else { nx = 0.0f; ny = 1.0f; nz = 0.0f; }
-
-					for (auto& t : tri) { t.nx = nx; t.ny = ny; t.nz = nz; }
-
-					pt.tex_sel = f->tex_sel;
-					pt.material = game::face_material_for(op);
-					pt.src_index[0] = idx[0]; pt.src_index[1] = idx[1]; pt.src_index[2] = idx[2];
-					pt.v[0] = tri[0]; pt.v[1] = tri[1]; pt.v[2] = tri[2];
-					tris.push_back(pt);
+					const int32_t idx[3] = { f->i0, f->i1, f->i2 };
+					const int32_t uv[3][2]{};
+					add_triangle(idx, uv, 0, game::get_color_table()[entry] & 0x00FFFFFFu, false);
 				}
 			}
 
@@ -616,7 +639,8 @@ namespace comp
 		// Opaque runs first, so a mesh that mixes solid and translucent faces still composites in
 		// the right order when the geometry is rasterized rather than path traced.
 		const auto part_key = [](const pending_tri& t) {
-			return std::tuple{ t.material.blend, t.material.chroma_keyed, t.material.opacity, t.tex_sel };
+			return std::tuple{ t.material.blend, t.material.chroma_keyed, t.material.opacity,
+			                   t.textured, t.tex_sel, t.colour };
 		};
 
 		std::stable_sort(tris.begin(), tris.end(), [&](const pending_tri& a, const pending_tri& b) {
@@ -627,7 +651,8 @@ namespace comp
 		for (size_t i = 0; i < tris.size(); ++i)
 		{
 			if (parts.empty() || part_key(tris[i - 1]) != part_key(tris[i])) {
-				parts.push_back({ tris[i].tex_sel, tris[i].material, static_cast<uint32_t>(i), 0 });
+				parts.push_back({ tris[i].tex_sel, tris[i].colour, tris[i].textured,
+				                  tris[i].material, static_cast<uint32_t>(i), 0 });
 			}
 			++parts.back().triangle_count;
 			out.insert(out.end(), tris[i].v, tris[i].v + 3);
@@ -721,6 +746,64 @@ namespace comp
 		}
 
 		return &(m_geometry[mesh] = std::move(geo));
+	}
+
+	// Sprites are gathered per object per frame rather than cached with the mesh: their records
+	// animate, and the quad they become is camera-facing, so nothing about them survives a frame.
+	void ignition_inject::collect_sprites(const game::ign_object* obj, const D3DMATRIX& world)
+	{
+		const auto mesh = obj->mesh;
+		const auto verts = game::mesh_vertices(mesh);
+		const int32_t n_verts = mesh->vertex_count;
+
+		// The emitter takes the texture from the first page of the object's group and never from
+		// a per-face selector (0x004509AA), which a zero selector reproduces exactly.
+		game::tex_resolve why{};
+		const int32_t tex_id = game::resolve_texture_id(0, obj->tex_page, why);
+
+		const auto* cur = static_cast<const uint8_t*>(game::mesh_faces(mesh));
+		for (int32_t i = 0; i < mesh->face_count; ++i)
+		{
+			const uint32_t op = static_cast<uint32_t>(*reinterpret_cast<const int32_t*>(cur)) & 0xFFu;
+			if (op >= std::size(game::FACE_STRIDE)) {
+				break;
+			}
+
+			const uint8_t stride = game::FACE_STRIDE[op];
+			if (stride == 0) {
+				break;
+			}
+
+			if (game::face_is_sprite(op))
+			{
+				const auto f = reinterpret_cast<const game::ign_face_sprite*>(cur);
+				if (f->vertex >= 0 && f->vertex < n_verts
+					&& (f->half_width > 0 || f->half_height > 0))
+				{
+					const auto& s = verts[f->vertex];
+					const float ox = static_cast<float>(s.x);
+					const float oy = static_cast<float>(-s.y);
+					const float oz = static_cast<float>(s.z);
+
+					sprite_instance sp{};
+					sp.x = ox * world._11 + oy * world._21 + oz * world._31 + world._41;
+					sp.y = ox * world._12 + oy * world._22 + oz * world._32 + world._42;
+					sp.z = ox * world._13 + oy * world._23 + oz * world._33 + world._43;
+					sp.half_width = f->half_width;
+					sp.half_height = f->half_height;
+					sp.u0 = static_cast<float>(f->u0) / 65536.0f;
+					sp.v0 = static_cast<float>(f->v0) / 65536.0f;
+					sp.u1 = static_cast<float>(f->u1) / 65536.0f;
+					sp.v1 = static_cast<float>(f->v1) / 65536.0f;
+					sp.tex_id = tex_id;
+					sp.material = game::sprite_material_for(op,
+						static_cast<uint8_t>(f->opacity & 0xFF));
+					m_sprites.push_back(sp);
+				}
+			}
+
+			cur += stride;
+		}
 	}
 
 	D3DMATRIX ignition_inject::build_world(const game::ign_object* obj)
@@ -854,6 +937,7 @@ namespace comp
 			m_scene = *scene;
 			m_scene_valid = true;
 			m_queue.clear();
+			m_sprites.clear();
 		}
 		else
 		{
@@ -898,13 +982,16 @@ namespace comp
 				continue;
 			}
 
+			const D3DMATRIX world = build_world(obj);
+			collect_sprites(obj, world);
+
 			const auto geo = geometry_for(dev, mesh);
 			if (!geo || !geo->triangle_count) {
 				++m_obj_extract_failed;
 			}
 
 			if (geo && geo->triangle_count) {
-				m_queue.push_back({ geo, build_world(obj), obj->tex_page });
+				m_queue.push_back({ geo, world, obj->tex_page });
 			}
 		}
 	}
@@ -986,11 +1073,11 @@ namespace comp
 
 			shared::common::log("Ignition", std::format(
 				"captures={} (noScene={} noDevice={} skippedViewport={}) endScenes={} submits={} "
-				"lastDraws={} lastVerts={} meshes={} tex(built={} pages={} miss={} oob={} unset={} missIds={}) "
+				"lastDraws={} lastVerts={} lastSprites={} meshes={} tex(built={} pages={} miss={} oob={} unset={} missIds={}) "
 				"rebuilds={} fail(vb={} tex={} noMesh={} insane={} extract={}) merged={} "
 				"lists(world={} dropped={} other={}) lastDrawErr=0x{:08X}",
 				m_captures, m_captures_no_scene, m_captures_no_device, m_captures_skipped_viewport,
-				m_end_scenes, m_submits, m_last_draws, m_last_vertices, m_geometry.size(),
+				m_end_scenes, m_submits, m_last_draws, m_last_vertices, m_last_sprites, m_geometry.size(),
 				m_textures_built, m_texture_pages.size(), m_texture_misses,
 				m_tex_index_oob, m_tex_entry_unset, m_missing_ids.size(), m_geometry_rebuilds,
 				m_vb_create_failed, m_tex_create_failed, m_obj_no_mesh, m_obj_insane_counts,
@@ -1000,7 +1087,7 @@ namespace comp
 				shared::common::LOG_TYPE::LOG_TYPE_DEFAULT, true);
 		}
 
-		if (m_scene_valid && !m_queue.empty())
+		if (m_scene_valid && (!m_queue.empty() || !m_sprites.empty()))
 		{
 			if (const auto dev = shared::globals::d3d_device; dev) {
 				submit(dev);
@@ -1009,6 +1096,7 @@ namespace comp
 
 		m_scene_valid = false;
 		m_queue.clear();
+		m_sprites.clear();
 
 		// Viewport counting is NOT reset here. Present is the frame boundary; resetting
 		// mid-frame lets a second RenderScene in the same frame pass as viewport 0 and replace
@@ -1055,12 +1143,14 @@ namespace comp
 	// (rtx_instance_manager.cpp: SRC_ALPHA/ONE_MINUS_SRC_ALPHA becomes BlendType::kAlpha,
 	// SRC_ALPHA/ONE becomes kAlphaEmissive), and replays the texture-stage alpha ops and
 	// D3DRS_TEXTUREFACTOR in its own shader, so the opacity reaches the path tracer intact.
-	void ignition_inject::apply_material(IDirect3DDevice9* dev, const game::face_material& mat)
+	void ignition_inject::apply_material(IDirect3DDevice9* dev, const game::face_material& mat,
+	                                     const uint32_t colour)
 	{
 		// Palette index 0 is written with alpha 0. Chroma-keyed faces discard it; the rest keep
 		// drawing it black, exactly as the game does.
 		dev->SetRenderState(D3DRS_ALPHATESTENABLE, mat.chroma_keyed ? TRUE : FALSE);
-		dev->SetRenderState(D3DRS_TEXTUREFACTOR, (static_cast<DWORD>(mat.opacity) << 24) | 0x00FFFFFFu);
+		dev->SetRenderState(D3DRS_TEXTUREFACTOR,
+			(static_cast<DWORD>(mat.opacity) << 24) | (colour & 0x00FFFFFFu));
 
 		const bool blended = mat.blend != game::face_blend::opaque;
 		dev->SetRenderState(D3DRS_ALPHABLENDENABLE, blended ? TRUE : FALSE);
@@ -1072,6 +1162,146 @@ namespace comp
 		// Ignition sorts back-to-front and owns no depth buffer, so translucent faces never wrote
 		// depth. Keeping that is what stops a cloud from occluding what is behind it.
 		dev->SetRenderState(D3DRS_ZWRITEENABLE, blended ? FALSE : TRUE);
+	}
+
+	// Expands the gathered sprites into camera-facing quads.
+	//
+	// The game sizes a sprite in screen space: emitter 0x00450860 computes half = value * 4.0 / w,
+	// in the same 24.8 fixed screen units as the vertex it anchors to. Undoing that against the
+	// projection we hand Remix -- half_px = W * focal / view_z with w = 4 * view_z -- leaves
+	// W = value / (256 * focal), with the depth term cancelling as it must.
+	void ignition_inject::submit_sprites(IDirect3DDevice9* dev, const D3DMATRIX& view)
+	{
+		const double zoom = (m_scene.zoom != 0.0) ? fabs(m_scene.zoom) : 1.0;
+		const float focal_x = static_cast<float>(m_scene.focal_x * zoom);
+		const float focal_y = static_cast<float>(m_scene.focal_y);
+		if (focal_x <= 0.0f || focal_y <= 0.0f) {
+			return;
+		}
+
+		// Columns of the view rotation are the world-space axes of the camera basis.
+		const float right[3] = { view._11, view._21, view._31 };
+		const float up[3]    = { view._12, view._22, view._32 };
+		const float fwd[3]   = { view._13, view._23, view._33 };
+
+		std::stable_sort(m_sprites.begin(), m_sprites.end(),
+			[](const sprite_instance& a, const sprite_instance& b) {
+				return std::tuple{ a.material.blend, a.material.opacity, a.tex_id }
+				     < std::tuple{ b.material.blend, b.material.opacity, b.tex_id };
+			});
+
+		m_sprite_vertices.clear();
+		m_sprite_vertices.reserve(m_sprites.size() * 6);
+
+		struct sprite_run { uint32_t first_vertex, vertex_count; int32_t tex_id; game::face_material material; };
+		std::vector<sprite_run> runs;
+
+		for (const auto& sp : m_sprites)
+		{
+			// The emitter drops the sprite when the anchor's w is at or below 200, and w is four
+			// times the view depth.
+			const float view_z = sp.x * fwd[0] + sp.y * fwd[1] + sp.z * fwd[2] + view._43;
+			if (view_z <= 50.0f) {
+				continue;
+			}
+
+			const float hw = static_cast<float>(sp.half_width) / (256.0f * focal_x);
+			const float hh = static_cast<float>(sp.half_height) / (256.0f * focal_y);
+
+			ffp_vertex corner[4]{};
+			const float sx[4] = { -hw,  hw,  hw, -hw };
+			const float sy[4] = {  hh,  hh, -hh, -hh };
+			const float cu[4] = { sp.u0, sp.u1, sp.u1, sp.u0 };
+			const float cv[4] = { sp.v0, sp.v0, sp.v1, sp.v1 };
+
+			for (int k = 0; k < 4; ++k)
+			{
+				corner[k].x = sp.x + right[0] * sx[k] + up[0] * sy[k];
+				corner[k].y = sp.y + right[1] * sx[k] + up[1] * sy[k];
+				corner[k].z = sp.z + right[2] * sx[k] + up[2] * sy[k];
+				corner[k].nx = -fwd[0];
+				corner[k].ny = -fwd[1];
+				corner[k].nz = -fwd[2];
+				corner[k].u = cu[k];
+				corner[k].v = cv[k];
+			}
+
+			if (runs.empty() || runs.back().tex_id != sp.tex_id
+				|| runs.back().material.blend != sp.material.blend
+				|| runs.back().material.opacity != sp.material.opacity)
+			{
+				runs.push_back({ static_cast<uint32_t>(m_sprite_vertices.size()), 0,
+				                 sp.tex_id, sp.material });
+			}
+
+			for (const int k : { 0, 1, 2, 0, 2, 3 }) {
+				m_sprite_vertices.push_back(corner[k]);
+			}
+			runs.back().vertex_count += 6;
+		}
+
+		if (m_sprite_vertices.empty()) {
+			return;
+		}
+
+		const auto bytes = static_cast<UINT>(m_sprite_vertices.size() * sizeof(ffp_vertex));
+
+		if (m_sprite_buffer && m_sprite_buffer_verts < m_sprite_vertices.size()) {
+			m_sprite_buffer->Release();
+			m_sprite_buffer = nullptr;
+		}
+
+		if (!m_sprite_buffer)
+		{
+			m_sprite_buffer_verts = static_cast<uint32_t>(m_sprite_vertices.size()) * 2;
+			if (FAILED(dev->CreateVertexBuffer(m_sprite_buffer_verts * sizeof(ffp_vertex),
+				D3DUSAGE_WRITEONLY, 0, D3DPOOL_MANAGED, &m_sprite_buffer, nullptr)))
+			{
+				++m_vb_create_failed;
+				m_sprite_buffer = nullptr;
+				return;
+			}
+		}
+
+		void* dst = nullptr;
+		if (FAILED(m_sprite_buffer->Lock(0, bytes, &dst, 0))) {
+			return;
+		}
+		memcpy(dst, m_sprite_vertices.data(), bytes);
+		m_sprite_buffer->Unlock();
+
+		D3DMATRIX identity{};
+		identity._11 = identity._22 = identity._33 = identity._44 = 1.0f;
+		dev->SetTransform(D3DTS_WORLD, &identity);
+		dev->SetStreamSource(0, m_sprite_buffer, 0, sizeof(ffp_vertex));
+
+		for (const auto& run : runs)
+		{
+			dev->SetTexture(0, texture_for(dev, run.tex_id));
+			apply_material(dev, run.material, 0x00FFFFFFu);
+			dev->DrawPrimitive(D3DPT_TRIANGLELIST, run.first_vertex, run.vertex_count / 3);
+		}
+
+		m_last_sprites = static_cast<uint32_t>(m_sprite_vertices.size() / 6);
+
+		// The size derivation is the one part of the sprite path that cannot be checked against
+		// the disassembly alone, so report it once with the numbers that went into it.
+		if (!m_logged_first_sprites)
+		{
+			m_logged_first_sprites = true;
+			const auto& sp = m_sprites.front();
+			shared::common::log("IgnSprite", std::format(
+				"first sprite submit: quads={} runs={} focal=({:.0f},{:.0f}) "
+				"raw=({},{}) -> world half=({:.2f},{:.2f}) uv=({:.3f},{:.3f})-({:.3f},{:.3f}) "
+				"tex={} opacity={} blend={}",
+				m_last_sprites, runs.size(), focal_x, focal_y,
+				sp.half_width, sp.half_height,
+				static_cast<float>(sp.half_width) / (256.0f * focal_x),
+				static_cast<float>(sp.half_height) / (256.0f * focal_y),
+				sp.u0, sp.v0, sp.u1, sp.v1, sp.tex_id, sp.material.opacity,
+				static_cast<int>(sp.material.blend)),
+				shared::common::LOG_TYPE::LOG_TYPE_GREEN, true);
+		}
 	}
 
 	void ignition_inject::submit(IDirect3DDevice9* dev)
@@ -1124,8 +1354,12 @@ namespace comp
 		dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
 
 		ensure_white_texture(dev);
-		dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+		// Modulating by the texture factor rather than selecting the texture lets flat-shaded
+		// faces share this setup: they bind the white texture and put their palette colour in the
+		// factor, while textured faces leave the factor's RGB at white and are unaffected.
+		dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
 		dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+		dev->SetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_TFACTOR);
 
 		// Glide takes the blend alpha purely from the constant colour
 		// (guAlphaSource(GR_ALPHASOURCE_CC_ALPHA) in every translucent rasterizer), and cuts the
@@ -1170,13 +1404,20 @@ namespace comp
 
 			for (const auto& part : inst.geometry->parts)
 			{
-				game::tex_resolve why{};
-				const int32_t tex_id = game::resolve_texture_id(part.tex_sel, inst.tex_page, why);
-				if (why == game::tex_resolve::index_out_of_range) ++m_tex_index_oob;
-				else if (why == game::tex_resolve::table_entry_unset) ++m_tex_entry_unset;
+				if (part.textured)
+				{
+					game::tex_resolve why{};
+					const int32_t tex_id = game::resolve_texture_id(part.tex_sel, inst.tex_page, why);
+					if (why == game::tex_resolve::index_out_of_range) ++m_tex_index_oob;
+					else if (why == game::tex_resolve::table_entry_unset) ++m_tex_entry_unset;
 
-				dev->SetTexture(0, texture_for(dev, tex_id));
-				apply_material(dev, part.material);
+					dev->SetTexture(0, texture_for(dev, tex_id));
+				}
+				else {
+					dev->SetTexture(0, m_white_texture);
+				}
+
+				apply_material(dev, part.material, part.colour);
 
 				const HRESULT hr = dev->DrawPrimitive(D3DPT_TRIANGLELIST,
 					part.first_triangle * 3, part.triangle_count);
@@ -1189,6 +1430,11 @@ namespace comp
 					m_last_draw_error = hr;
 				}
 			}
+		}
+		// After the world, so translucent particles composite over it.
+		m_last_sprites = 0;
+		if (!m_sprites.empty()) {
+			submit_sprites(dev, view);
 		}
 		s_injecting = false;
 

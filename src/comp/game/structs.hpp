@@ -27,6 +27,30 @@ namespace comp::game
 	};
 	static_assert(sizeof(ign_face_tri) == 0x2C, "textured face record is 0x2C bytes");
 
+	// Flat-shaded triangle. `colour` is only a g_colorTable index for opcode 0x0F; the other
+	// three opcodes reinterpret it as an effect level -- see face_is_coloured_tri.
+	struct ign_face_flat
+	{
+		int32_t opcode;
+		int32_t i0, i1, i2;
+		int32_t colour;
+	};
+	static_assert(sizeof(ign_face_flat) == 0x14, "flat face record is 0x14 bytes");
+
+	// A camera-facing quad, not a triangle: one anchor vertex, a texture rectangle and a size in
+	// screen units. Recovered from emitter 0x00450860 and rasterizer 0x00452DF0.
+	struct ign_face_sprite
+	{
+		int32_t opcode;
+		int32_t vertex;        // index into the object's vertex array -- the anchor point
+		int32_t u0, v0;
+		int32_t u1, v1;
+		int32_t opacity;       // becomes the grConstantColorValue alpha
+		int32_t half_width;    // screen half extent is this * 4.0 / w
+		int32_t half_height;
+	};
+	static_assert(sizeof(ign_face_sprite) == 0x24, "sprite record is 0x24 bytes");
+
 	// A model: counts, then the vertex array, then the face stream.
 	//   vertices : (int32*)(mesh + 2)
 	//   faces    : (int32*)(mesh + 2 + vertex_count * 3)
@@ -123,6 +147,32 @@ namespace comp::game
 		}
 	}
 
+	// Of the four ign_face_flat opcodes only 0x0F is geometry. Its display-list case (0x00451057)
+	// looks `colour` up in g_colorTable and draws opaque.
+	//
+	// The other three are the software renderer faking lighting, and each decodes `colour` as a
+	// level in 0x20..0x3F rather than as a palette index:
+	//   0x1D (0x00451318) builds a grey from 0x40 - level and composites it ZERO/1-SRC_COLOR --
+	//        a shadow blob. 144 of the 194 objects in a Canada race are made of these.
+	//   0x1C (0x004512BA) reads a small ramp at 0x00621DF4, forces alpha 0x7F and adds it -- a
+	//        light pool.
+	//   0x14 (0x004510A2) remaps a few levels and alpha blends -- a darkening patch.
+	// Remix path traces real shadows and real lights, so drawing these would double up. They are
+	// deliberately not submitted, which is also why most objects contribute no geometry.
+	inline bool face_is_coloured_tri(const uint32_t op) {
+		return op == 0x0F;
+	}
+
+	// Camera-facing quads: tyre smoke, explosions, impact sparks, headlight glows.
+	inline bool face_is_sprite(const uint32_t op) {
+		switch (op) {
+		case 0x07: case 0x08: case 0x1A: case 0x1B:
+			return true;
+		default:
+			return false;
+		}
+	}
+
 	// 0x16/0x17/0x19 reach their emitter through a stub that pushes a depth bias of 0x50,
 	// pushing them back in the painter's-algorithm sort -- decals and overlays.
 	inline bool face_is_decal(const uint32_t op) {
@@ -175,7 +225,26 @@ namespace comp::game
 		case 0x18: case 0x19:
 			return { face_blend::additive, 0x4F, true };   // 0x00452A90: push 0x4F000000
 		default:
+			// Opcode 0x0F and anything unrecognised: opaque, no chroma key.
 			return { face_blend::opaque,   0xFF, false };
+		}
+	}
+
+	// Sprites carry their own opacity in the record, so only the blend comes from the opcode:
+	//   0x07, 0x08 -> 0x00452DF0  SRC_ALPHA / ONE_MINUS_SRC_ALPHA
+	//   0x1A       -> 0x004530C0  SRC_ALPHA / ONE
+	//   0x1B       -> 0x00453390  ZERO / ONE_MINUS_SRC_COLOR
+	//
+	// 0x1B is reported as `alpha` rather than faithfully. Remix's blend classifier
+	// (rtx_instance_manager.cpp) has no case for ZERO/ONE_MINUS_SRC_COLOR and falls through to
+	// treating the draw as opaque, which turns dark smoke into a solid black quad. Alpha blending
+	// keeps it translucent, which is far closer to the intent than a black hole.
+	inline face_material sprite_material_for(const uint32_t op, const uint8_t opacity) {
+		switch (op) {
+		case 0x1A:
+			return { face_blend::additive, opacity, true };
+		default:
+			return { face_blend::alpha,    opacity, true };
 		}
 	}
 }
