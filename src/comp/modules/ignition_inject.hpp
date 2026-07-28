@@ -168,8 +168,15 @@ namespace comp
 		// SYS.COL, used only if the live colour table is unreadable.
 		void ensure_fallback_palette();
 
-		// Snapshots the game's live colour table into a page record.
-		void snapshot_palette(uint32_t (&out)[256]);
+		// Reads the game's live colour table, falling back to SYS.COL if it is not populated.
+		void read_live_palette(uint32_t (&out)[256]);
+
+		// Drops the converted textures whose palette entries have changed since they were
+		// built, so palette-cycled animation plays instead of freezing on the first frame.
+		void refresh_animated_textures();
+
+		// Removes the dark fringe bilinear filtering pulls out of transparent texels.
+		static void bleed_transparent_edges(const D3DLOCKED_RECT& rect);
 
 		// Lowers the game's once-per-36 Hz-tick render gate.
 		static void patch_render_rate();
@@ -194,7 +201,11 @@ namespace comp
 		struct texture_page
 		{
 			std::vector<uint8_t> pixels;
-			uint32_t palette[256];
+
+			// Which palette indices this page actually uses. The game animates water and waves
+			// by cycling palette entries rather than re-uploading pixels, so a page has to be
+			// reconverted when an index it references changes -- and only then.
+			uint64_t used_indices[4];
 		};
 
 		std::unordered_map<int32_t, texture_page> m_texture_pages;
@@ -211,6 +222,11 @@ namespace comp
 
 		uint32_t m_fallback_palette[256]{};
 		bool m_palette_loaded = false;
+
+		// The palette the currently built textures were converted with.
+		uint32_t m_palette_cache[256]{};
+		bool m_palette_cache_valid = false;
+		uint32_t m_textures_reconverted = 0;
 
 		// Silent failure paths that would otherwise look identical to "the geometry vanished".
 		uint32_t m_vb_create_failed = 0;
