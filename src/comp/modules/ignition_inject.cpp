@@ -698,11 +698,13 @@ namespace comp
 				geo.last_checked_scene = m_scenes_submitted;
 				if (const uint64_t sig = mesh_signature(mesh); sig != geo.signature)
 				{
-					geo.signature = sig;
 					++m_geometry_rebuilds;
 					if (!fill_geometry(dev, mesh, geo)) {
 						return nullptr;
 					}
+					// Only once the rebuild succeeded, so a failed one is retried rather than
+					// leaving the entry marked current with stale contents.
+					geo.signature = sig;
 				}
 			}
 
