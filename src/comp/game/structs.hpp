@@ -129,20 +129,53 @@ namespace comp::game
 		return op == 0x16 || op == 0x17 || op == 0x19;
 	}
 
-	// Whether the face is drawn with the Glide chroma key on, i.e. palette index 0 is cut out
-	// rather than drawn black.
+	// How a face is composited. Glide has one blend state at a time, so each rasterizer sets it
+	// on entry; the mode is a property of the opcode, not of the texture or the object.
+	enum class face_blend : uint8_t
+	{
+		opaque,     // grAlphaBlendFunction(ONE, ZERO, ...)
+		alpha,      // grAlphaBlendFunction(SRC_ALPHA, ONE_MINUS_SRC_ALPHA, ...)
+		additive,   // grAlphaBlendFunction(SRC_ALPHA, ONE, ...)
+	};
+
+	// Everything the compositing of one face depends on.
 	//
-	// The rasterizers these opcodes reach (0x004523E0, 0x00452730, 0x00452A90, 0x00452DF0,
-	// 0x004530C0, 0x00453390, 0x00453930, 0x00453C10, 0x00453F00) all bracket their draw with
-	// grChromakeyMode(1) / grChromakeyValue(g_colorTable[0]) / grChromakeyMode(0). The
-	// rasterizer for 0x11 and 0x15 (0x00452070) does not, so those stay opaque.
-	inline bool face_is_chroma_keyed(const uint32_t op) {
+	// `opacity` is the alpha byte of the Glide constant colour, which is what the blend actually
+	// multiplies by: the rasterizers select GR_ALPHASOURCE_CC_ALPHA, so texture and vertex alpha
+	// play no part. `chroma_keyed` is the separate grChromakeyMode test that cuts palette index 0
+	// out instead of drawing it black.
+	struct face_material
+	{
+		face_blend blend;
+		uint8_t opacity;
+		bool chroma_keyed;
+	};
+
+	// Face opcode -> compositing, traced from g_faceDispatch (0x0048FA90) through each emitter to
+	// the rasterizer that runs for the display-list opcode it writes:
+	//
+	//   face 0x11,0x15 -> emitter 0x0044F780 -> dl 0x11 -> 0x00452070
+	//   face 0x12,0x16 -> emitter 0x0044FF10 -> dl 0x12 -> 0x004523E0
+	//   face 0x13,0x17 -> emitter 0x00450250 -> dl 0x13 -> 0x00452730
+	//   face 0x18,0x19 -> emitter 0x00450560 -> dl 0x18 -> 0x00452A90
+	//
+	// The second opcode of each pair is the same emitter reached through a stub that pushes a
+	// depth bias of 0x50, so it composites identically. The blend arguments and the constant
+	// colour below are the literal operands of those rasterizers' grAlphaBlendFunction and
+	// grConstantColorValue calls.
+	inline face_material face_material_for(const uint32_t op)
+	{
 		switch (op) {
-		case 0x12: case 0x13: case 0x16:
-		case 0x17: case 0x18: case 0x19:
-			return true;
+		case 0x11: case 0x15:
+			return { face_blend::opaque,   0xFF, false };
+		case 0x12: case 0x16:
+			return { face_blend::opaque,   0xFF, true };
+		case 0x13: case 0x17:
+			return { face_blend::alpha,    0x7F, true };   // 0x00452730: push 0x7F000000
+		case 0x18: case 0x19:
+			return { face_blend::additive, 0x4F, true };   // 0x00452A90: push 0x4F000000
 		default:
-			return false;
+			return { face_blend::opaque,   0xFF, false };
 		}
 	}
 }

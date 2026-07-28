@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <tuple>
 
 namespace comp
 {
@@ -455,7 +456,7 @@ namespace comp
 		struct pending_tri
 		{
 			int32_t tex_sel;
-			bool chroma_keyed;
+			game::face_material material;
 			int32_t src_index[3];             // mesh vertex indices, for sharing normals
 			float area_nx, area_ny, area_nz;  // un-normalised face normal (length == 2*area)
 			ffp_vertex v[3];
@@ -521,7 +522,7 @@ namespace comp
 					for (auto& t : tri) { t.nx = nx; t.ny = ny; t.nz = nz; }
 
 					pt.tex_sel = f->tex_sel;
-					pt.chroma_keyed = game::face_is_chroma_keyed(op);
+					pt.material = game::face_material_for(op);
 					pt.src_index[0] = idx[0]; pt.src_index[1] = idx[1]; pt.src_index[2] = idx[2];
 					pt.v[0] = tri[0]; pt.v[1] = tri[1]; pt.v[2] = tri[2];
 					tris.push_back(pt);
@@ -573,17 +574,21 @@ namespace comp
 			}
 		}
 
-		std::stable_sort(tris.begin(), tris.end(), [](const pending_tri& a, const pending_tri& b) {
-			if (a.chroma_keyed != b.chroma_keyed) return a.chroma_keyed < b.chroma_keyed;
-			return a.tex_sel < b.tex_sel;
+		// Opaque runs first, so a mesh that mixes solid and translucent faces still composites in
+		// the right order when the geometry is rasterized rather than path traced.
+		const auto part_key = [](const pending_tri& t) {
+			return std::tuple{ t.material.blend, t.material.chroma_keyed, t.material.opacity, t.tex_sel };
+		};
+
+		std::stable_sort(tris.begin(), tris.end(), [&](const pending_tri& a, const pending_tri& b) {
+			return part_key(a) < part_key(b);
 		});
 
 		out.reserve(tris.size() * 3);
 		for (size_t i = 0; i < tris.size(); ++i)
 		{
-			if (parts.empty() || parts.back().tex_sel != tris[i].tex_sel
-				|| parts.back().chroma_keyed != tris[i].chroma_keyed) {
-				parts.push_back({ tris[i].tex_sel, tris[i].chroma_keyed, static_cast<uint32_t>(i), 0 });
+			if (parts.empty() || part_key(tris[i - 1]) != part_key(tris[i])) {
+				parts.push_back({ tris[i].tex_sel, tris[i].material, static_cast<uint32_t>(i), 0 });
 			}
 			++parts.back().triangle_count;
 			out.insert(out.end(), tris[i].v, tris[i].v + 3);
@@ -958,6 +963,31 @@ namespace comp
 		}
 	}
 
+	// Reproduces the Glide state the face's rasterizer would have set.
+	//
+	// Remix derives its own translucency from exactly these render states
+	// (rtx_instance_manager.cpp: SRC_ALPHA/ONE_MINUS_SRC_ALPHA becomes BlendType::kAlpha,
+	// SRC_ALPHA/ONE becomes kAlphaEmissive), and replays the texture-stage alpha ops and
+	// D3DRS_TEXTUREFACTOR in its own shader, so the opacity reaches the path tracer intact.
+	void ignition_inject::apply_material(IDirect3DDevice9* dev, const game::face_material& mat)
+	{
+		// Palette index 0 is written with alpha 0. Chroma-keyed faces discard it; the rest keep
+		// drawing it black, exactly as the game does.
+		dev->SetRenderState(D3DRS_ALPHATESTENABLE, mat.chroma_keyed ? TRUE : FALSE);
+		dev->SetRenderState(D3DRS_TEXTUREFACTOR, (static_cast<DWORD>(mat.opacity) << 24) | 0x00FFFFFFu);
+
+		const bool blended = mat.blend != game::face_blend::opaque;
+		dev->SetRenderState(D3DRS_ALPHABLENDENABLE, blended ? TRUE : FALSE);
+		dev->SetRenderState(D3DRS_SRCBLEND, blended ? D3DBLEND_SRCALPHA : D3DBLEND_ONE);
+		dev->SetRenderState(D3DRS_DESTBLEND,
+			mat.blend == game::face_blend::additive ? D3DBLEND_ONE :
+			mat.blend == game::face_blend::alpha    ? D3DBLEND_INVSRCALPHA : D3DBLEND_ZERO);
+
+		// Ignition sorts back-to-front and owns no depth buffer, so translucent faces never wrote
+		// depth. Keeping that is what stops a cloud from occluding what is behind it.
+		dev->SetRenderState(D3DRS_ZWRITEENABLE, blended ? FALSE : TRUE);
+	}
+
 	void ignition_inject::submit(IDirect3DDevice9* dev)
 	{
 		D3DMATRIX view{}, projection{};
@@ -1000,10 +1030,9 @@ namespace comp
 
 		dev->SetRenderState(D3DRS_LIGHTING, FALSE);
 		dev->SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE);
-		dev->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
-		dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
 		dev->SetRenderState(D3DRS_ALPHAREF, 0);
 		dev->SetRenderState(D3DRS_ALPHAFUNC, D3DCMP_GREATER);
+		dev->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
 		// Ignition picks its winding at runtime from the sign of scene->zoom, so neither
 		// winding can be assumed here.
 		dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
@@ -1011,8 +1040,15 @@ namespace comp
 		ensure_white_texture(dev);
 		dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
 		dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
-		dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+
+		// Glide takes the blend alpha purely from the constant colour
+		// (guAlphaSource(GR_ALPHASOURCE_CC_ALPHA) in every translucent rasterizer), and cuts the
+		// chroma key with a separate test. Modulating texture alpha by the texture factor
+		// expresses both at once: the factor carries the opacity, while the zero alpha we give
+		// palette index 0 survives for the alpha test to discard.
+		dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
 		dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+		dev->SetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_TFACTOR);
 		dev->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
 
 		// Remix matches stage 0's TEXCOORDINDEX against the declaration's UsageIndex; leaving
@@ -1054,10 +1090,7 @@ namespace comp
 				else if (why == game::tex_resolve::table_entry_unset) ++m_tex_entry_unset;
 
 				dev->SetTexture(0, texture_for(dev, tex_id));
-
-				// Palette index 0 is written with alpha 0. Chroma-keyed faces discard it;
-				// opaque faces keep drawing it black, exactly as the game does.
-				dev->SetRenderState(D3DRS_ALPHATESTENABLE, part.chroma_keyed ? TRUE : FALSE);
+				apply_material(dev, part.material);
 
 				const HRESULT hr = dev->DrawPrimitive(D3DPT_TRIANGLELIST,
 					part.first_triangle * 3, part.triangle_count);

@@ -116,15 +116,16 @@ namespace comp
 			float u, v;
 		};
 
-		// A run of triangles inside one mesh that share a texture selector. Faces are sorted by
-		// selector when the buffer is built so each distinct texture costs exactly one draw.
+		// A run of triangles inside one mesh that share a texture selector and compositing mode.
+		// Faces are sorted on both when the buffer is built, so each distinct combination costs
+		// exactly one draw.
 		//
 		// The selector is stored rather than a resolved texture because resolution needs the
 		// object's texture page too, and one mesh is instanced by objects on different pages.
 		struct mesh_part
 		{
 			int32_t tex_sel;
-			bool chroma_keyed;      // palette index 0 is cut out rather than drawn black
+			game::face_material material;
 			uint32_t first_triangle;
 			uint32_t triangle_count;
 		};
@@ -148,6 +149,7 @@ namespace comp
 		};
 
 		void submit(IDirect3DDevice9* dev);
+		static void apply_material(IDirect3DDevice9* dev, const game::face_material& mat);
 		bool build_view(D3DMATRIX& out) const;
 		bool build_projection(D3DMATRIX& out) const;
 		static D3DMATRIX build_world(const game::ign_object* obj);
