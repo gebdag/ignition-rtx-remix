@@ -31,6 +31,10 @@ namespace comp
 			}
 			else {
 				++ignition_inject::s_other_lists_seen;
+				// Which site draws the menu is the open question -- the menu region was never
+				// analysed, so the call inventory cannot be trusted. Record the callers.
+				++ignition_inject::s_list_callers[ret - shared::globals::exe_module_addr
+					+ game::PREFERRED_BASE];
 			}
 
 			if (is_world && ignition_inject::suppress_world_raster()) {
@@ -879,6 +883,16 @@ namespace comp
 
 		if ((m_end_scenes % 300) == 0)
 		{
+			if (!s_list_callers.empty())
+			{
+				std::string callers;
+				for (const auto& [ret, count] : s_list_callers) {
+					callers += std::format("{}0x{:08X}x{}", callers.empty() ? "" : " ", ret, count);
+				}
+				shared::common::log("IgnLists", std::format("non-world RunDisplayList callers: {}", callers),
+					shared::common::LOG_TYPE::LOG_TYPE_DEFAULT, true);
+			}
+
 			shared::common::log("Ignition", std::format(
 				"captures={} (noScene={} noDevice={} skippedViewport={}) endScenes={} submits={} "
 				"lastDraws={} lastVerts={} meshes={} tex(built={} pages={} miss={} oob={} unset={} missIds={}) "

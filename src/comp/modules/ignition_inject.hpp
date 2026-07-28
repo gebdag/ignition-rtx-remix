@@ -55,6 +55,9 @@ namespace comp
 		static inline uint32_t s_world_lists_seen = 0;
 		static inline uint32_t s_other_lists_seen = 0;
 
+		// Return address -> count, for the lists we do not classify as world.
+		static inline std::map<uint32_t, uint32_t> s_list_callers;
+
 		// nGlide composites its whole frame offscreen and blits it to the back buffer with a
 		// single StretchRect. That blit lands on top of whatever Remix produced, so while it
 		// runs the path traced image can never be seen. Suppressing just the blit is far more
