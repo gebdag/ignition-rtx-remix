@@ -130,14 +130,18 @@ namespace comp
 			uint32_t triangle_count;
 		};
 
-		// A mesh uploaded once and reused. Static contents are what let Remix keep the
-		// acceleration structure it builds instead of rebuilding it every frame.
+		// A mesh uploaded once and reused for as long as the game leaves it alone, which is what
+		// lets Remix keep the acceleration structure it builds. `signature` is what detects the
+		// meshes Ignition edits in place -- animated texture UVs, deforming car bodies -- so those
+		// are rebuilt while everything else stays static.
 		struct mesh_geometry
 		{
 			IDirect3DVertexBuffer9* vertex_buffer;
 			uint32_t vertex_count;
 			uint32_t triangle_count;
 			uint32_t last_used_scene;
+			uint32_t last_checked_scene;
+			uint64_t signature;
 			std::vector<mesh_part> parts;
 		};
 
@@ -155,6 +159,7 @@ namespace comp
 		static D3DMATRIX build_world(const game::ign_object* obj);
 
 		const mesh_geometry* geometry_for(IDirect3DDevice9* dev, game::ign_mesh* mesh);
+		bool fill_geometry(IDirect3DDevice9* dev, const game::ign_mesh* mesh, mesh_geometry& geo);
 		static bool extract_geometry(const game::ign_mesh* mesh, std::vector<ffp_vertex>& out,
 		                            std::vector<mesh_part>& parts);
 
@@ -235,6 +240,10 @@ namespace comp
 
 		uint32_t m_last_draws = 0;
 		uint32_t m_last_vertices = 0;
+
+		// Meshes re-extracted because the game edited them. Zero here while water is on screen
+		// means the change detection is not firing.
+		uint32_t m_geometry_rebuilds = 0;
 
 		// Diagnostics: why a frame produced nothing is otherwise invisible.
 		uint32_t m_captures = 0;

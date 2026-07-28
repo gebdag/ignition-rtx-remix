@@ -81,6 +81,45 @@ namespace comp
 			o_transform_all_objects();
 		}
 
+		// FNV-1a over the mesh data extract_geometry reads: the vertex array, and the records of
+		// the face opcodes we turn into triangles. Everything Ignition stores is 32 bit, so the
+		// hash consumes words rather than bytes.
+		uint64_t mesh_signature(const game::ign_mesh* mesh)
+		{
+			uint64_t h = 1469598103934665603ull;
+
+			const auto mix = [&h](const int32_t* words, const size_t count) {
+				for (size_t i = 0; i < count; ++i) {
+					h = (h ^ static_cast<uint32_t>(words[i])) * 1099511628211ull;
+				}
+			};
+
+			mix(reinterpret_cast<const int32_t*>(game::mesh_vertices(mesh)),
+				static_cast<size_t>(mesh->vertex_count) * 3);
+
+			const auto* cur = static_cast<const uint8_t*>(game::mesh_faces(mesh));
+			for (int32_t i = 0; i < mesh->face_count; ++i)
+			{
+				const uint32_t op = static_cast<uint32_t>(*reinterpret_cast<const int32_t*>(cur)) & 0xFFu;
+				if (op >= std::size(game::FACE_STRIDE)) {
+					break;
+				}
+
+				const uint8_t stride = game::FACE_STRIDE[op];
+				if (stride == 0) {
+					break;
+				}
+
+				if (game::face_is_textured_tri(op)) {
+					mix(reinterpret_cast<const int32_t*>(cur), stride / sizeof(int32_t));
+				}
+
+				cur += stride;
+			}
+
+			return h;
+		}
+
 		constexpr D3DVERTEXELEMENT9 INJECT_DECL[] = {
 			{ 0,  0, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0 },
 			{ 0, 12, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_NORMAL,   0 },
@@ -597,44 +636,89 @@ namespace comp
 		return true;
 	}
 
-	const ignition_inject::mesh_geometry* ignition_inject::geometry_for(IDirect3DDevice9* dev,
-	                                                                    game::ign_mesh* mesh)
+	// Rebuilds one cache entry from the mesh as it stands right now, reusing the vertex buffer
+	// whenever it is still the right size.
+	bool ignition_inject::fill_geometry(IDirect3DDevice9* dev, const game::ign_mesh* mesh,
+	                                    mesh_geometry& geo)
 	{
-		if (const auto it = m_geometry.find(mesh); it != m_geometry.end()) {
-			it->second.last_used_scene = m_scenes_submitted;
-			return &it->second;
-		}
-
 		std::vector<ffp_vertex> vertices;
 		std::vector<mesh_part> parts;
 		if (!extract_geometry(mesh, vertices, parts)) {
-			return nullptr;
+			return false;
 		}
 
 		const auto bytes = static_cast<UINT>(vertices.size() * sizeof(ffp_vertex));
 
-		IDirect3DVertexBuffer9* vb = nullptr;
-		if (FAILED(dev->CreateVertexBuffer(bytes, D3DUSAGE_WRITEONLY, 0, D3DPOOL_MANAGED, &vb, nullptr))) {
+		if (geo.vertex_buffer && geo.vertex_count != vertices.size()) {
+			geo.vertex_buffer->Release();
+			geo.vertex_buffer = nullptr;
+		}
+
+		if (!geo.vertex_buffer
+			&& FAILED(dev->CreateVertexBuffer(bytes, D3DUSAGE_WRITEONLY, 0, D3DPOOL_MANAGED,
+				&geo.vertex_buffer, nullptr)))
+		{
 			++m_vb_create_failed;
-			return nullptr;
+			geo.vertex_buffer = nullptr;
+			return false;
 		}
 
 		void* dst = nullptr;
-		if (FAILED(vb->Lock(0, bytes, &dst, 0))) {
-			vb->Release();
-			return nullptr;
+		if (FAILED(geo.vertex_buffer->Lock(0, bytes, &dst, 0))) {
+			return false;
 		}
 		memcpy(dst, vertices.data(), bytes);
-		vb->Unlock();
+		geo.vertex_buffer->Unlock();
 
-		mesh_geometry geo{};
-		geo.vertex_buffer = vb;
 		geo.vertex_count = static_cast<uint32_t>(vertices.size());
 		geo.triangle_count = geo.vertex_count / 3;
-		geo.last_used_scene = m_scenes_submitted;
 		geo.parts = std::move(parts);
+		return true;
+	}
 
-		return &(m_geometry[mesh] = geo);
+	// Ignition animates by editing meshes in place -- measured live in a Canada race, 57 of the
+	// 4619 textured faces on screen move their UVs in whole 64x64 tile steps (0x4000) and flip
+	// texSel between texture pages, while g_texTable and the colour table stay byte-identical.
+	// Car meshes deform the same way through their vertex array. So a cache keyed only on the
+	// mesh pointer freezes every animated surface on whatever frame it was first seen.
+	//
+	// The signature covers exactly what extract_geometry consumes, and is taken once per mesh per
+	// scene: walking the streams is a few hundred kilobytes of reads, far cheaper than re-running
+	// extraction, so only the handful of meshes that actually changed pay for a rebuild.
+	const ignition_inject::mesh_geometry* ignition_inject::geometry_for(IDirect3DDevice9* dev,
+	                                                                    game::ign_mesh* mesh)
+	{
+		if (const auto it = m_geometry.find(mesh); it != m_geometry.end())
+		{
+			auto& geo = it->second;
+			geo.last_used_scene = m_scenes_submitted;
+
+			if (geo.last_checked_scene != m_scenes_submitted)
+			{
+				geo.last_checked_scene = m_scenes_submitted;
+				if (const uint64_t sig = mesh_signature(mesh); sig != geo.signature)
+				{
+					geo.signature = sig;
+					++m_geometry_rebuilds;
+					if (!fill_geometry(dev, mesh, geo)) {
+						return nullptr;
+					}
+				}
+			}
+
+			return &geo;
+		}
+
+		mesh_geometry geo{};
+		geo.signature = mesh_signature(mesh);
+		geo.last_used_scene = m_scenes_submitted;
+		geo.last_checked_scene = m_scenes_submitted;
+		if (!fill_geometry(dev, mesh, geo)) {
+			if (geo.vertex_buffer) geo.vertex_buffer->Release();
+			return nullptr;
+		}
+
+		return &(m_geometry[mesh] = std::move(geo));
 	}
 
 	D3DMATRIX ignition_inject::build_world(const game::ign_object* obj)
@@ -901,12 +985,12 @@ namespace comp
 			shared::common::log("Ignition", std::format(
 				"captures={} (noScene={} noDevice={} skippedViewport={}) endScenes={} submits={} "
 				"lastDraws={} lastVerts={} meshes={} tex(built={} pages={} miss={} oob={} unset={} missIds={}) "
-				"fail(vb={} tex={} noMesh={} insane={} extract={}) merged={} "
+				"rebuilds={} fail(vb={} tex={} noMesh={} insane={} extract={}) merged={} "
 				"lists(world={} dropped={} other={}) lastDrawErr=0x{:08X}",
 				m_captures, m_captures_no_scene, m_captures_no_device, m_captures_skipped_viewport,
 				m_end_scenes, m_submits, m_last_draws, m_last_vertices, m_geometry.size(),
 				m_textures_built, m_texture_pages.size(), m_texture_misses,
-				m_tex_index_oob, m_tex_entry_unset, m_missing_ids.size(),
+				m_tex_index_oob, m_tex_entry_unset, m_missing_ids.size(), m_geometry_rebuilds,
 				m_vb_create_failed, m_tex_create_failed, m_obj_no_mesh, m_obj_insane_counts,
 				m_obj_extract_failed, m_captures_merged_pass,
 				s_world_lists_seen, s_world_lists_dropped, s_other_lists_seen,
