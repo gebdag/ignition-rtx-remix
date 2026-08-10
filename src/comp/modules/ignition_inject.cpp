@@ -127,8 +127,8 @@ namespace comp
 			D3DDECL_END()
 		};
 
-		// The rotation Ignition builds in TransformAllObjects, without the focal/depth scales
-		// it folds into rows 0/1/2 (reproduced from 0x0044D640).
+		// The camera rotation Ignition builds in TransformAllObjects, without the focal/depth
+		// scales it folds into rows 0/1/2 (reproduced from 0x0044D640).
 		//
 		// 0x0045FAB4 is COS and 0x0045FA04 is SIN, not the other way round -- both are thunks
 		// through 0x004624A5 so the disassembly does not say which, but the live matrix does.
@@ -140,15 +140,15 @@ namespace comp
 		//
 		// Angles arrive in 1/10 degree units -- the game's constant at 0x0046DC50 is pi/1800,
 		// not pi/180.
-		void euler_to_rotation(const double pitch, const double yaw, const double roll,
-		                       const double angle_to_rad_neg, float r[3][3])
+		void camera_rotation(const double pitch, const double yaw, const double roll, float r[3][3])
 		{
-			const double sp = sin(pitch * angle_to_rad_neg);
-			const double cp = cos(pitch * angle_to_rad_neg);
-			const double sy = sin(yaw * angle_to_rad_neg);
-			const double cy = cos(yaw * angle_to_rad_neg);
-			const double sr = sin(roll * angle_to_rad_neg);
-			const double cr = cos(roll * angle_to_rad_neg);
+			const double n = game::CAM_ANGLE_TO_RAD_NEG;
+			const double sp = sin(pitch * n);
+			const double cp = cos(pitch * n);
+			const double sy = sin(yaw * n);
+			const double cy = cos(yaw * n);
+			const double sr = sin(roll * n);
+			const double cr = cos(roll * n);
 
 			r[0][0] = static_cast<float>(cy * cr - sr * sp * sy);
 			r[0][1] = static_cast<float>(-(cp * sr));
@@ -161,6 +161,48 @@ namespace comp
 			r[2][0] = static_cast<float>(-(cp * sy));
 			r[2][1] = static_cast<float>(sp);
 			r[2][2] = static_cast<float>(cp * cy);
+		}
+
+		// The per-object rotation, which does NOT follow the camera's convention above.
+		//
+		// TransformObjectRotated (0x0044E160) never calls sin or cos: it reads the shared trig
+		// table allocated at 0x0044AB0E and indexes it at 5400 - rot_x, 5400 - rot_y but
+		// 1800 + rot_z. That table is filled from a counter starting at -1800 (0x0044AE11) with
+		// angle = counter/10 degrees, so entry i holds sin((i - 1800)/10 deg); the cosine table
+		// at 0x00621EA8 is the same array offset by 900 entries, i.e. by +90 degrees. Reading it
+		// at 5400 - rot is therefore an evaluation at MINUS the stored angle, and only Z keeps
+		// the angle's sign -- which is the whole difference from the camera, where all three are
+		// negated alike.
+		//
+		// The nine products the function then forms (0x0044E2B2 - 0x0044E4FE) compose to
+		//     Ry(-rot_y) * Rx(+rot_x) * Rz(-rot_z) * diag(1, -1, 1)
+		// -- an improper matrix, because the rotated path multiplies the raw vertex Y while the
+		// unrotated fast path subtracts it (0x0044DAF4, `sub esi, eax`). Our buffers carry that
+		// negation already (extract_geometry), so the trailing flip cancels and what an object
+		// needs is the proper rotation alone.
+		//
+		// Getting this wrong is invisible until an object pitches: the composition agrees with
+		// the camera's for yaw alone and for roll alone, which covers every piece of track
+		// scenery and any car on the flat. A car on a slope is the first thing that disagrees.
+		void object_rotation(const int16_t rot_x, const int16_t rot_y, const int16_t rot_z,
+		                     float r[3][3])
+		{
+			const double k = game::OBJ_ANGLE_TO_RAD;
+			const double sx = sin(rot_x * k), cx = cos(rot_x * k);
+			const double sy = sin(rot_y * k), cy = cos(rot_y * k);
+			const double sz = sin(rot_z * k), cz = cos(rot_z * k);
+
+			r[0][0] = static_cast<float>(sx * sy * sz + cy * cz);
+			r[0][1] = static_cast<float>(cy * sz - sx * sy * cz);
+			r[0][2] = static_cast<float>(-(cx * sy));
+
+			r[1][0] = static_cast<float>(-(cx * sz));
+			r[1][1] = static_cast<float>(cx * cz);
+			r[1][2] = static_cast<float>(-sx);
+
+			r[2][0] = static_cast<float>(sy * cz - sx * cy * sz);
+			r[2][1] = static_cast<float>(sx * cy * cz + sy * sz);
+			r[2][2] = static_cast<float>(cx * cy);
 		}
 	}
 
@@ -811,7 +853,7 @@ namespace comp
 		D3DMATRIX m{};
 
 		float r[3][3];
-		euler_to_rotation(obj->rot_x, obj->rot_y, obj->rot_z, game::OBJ_ANGLE_TO_RAD_NEG, r);
+		object_rotation(obj->rot_x, obj->rot_y, obj->rot_z, r);
 
 		// Row-vector convention: world = vertex * M.
 		m._11 = r[0][0]; m._12 = r[1][0]; m._13 = r[2][0]; m._14 = 0.0f;
@@ -828,8 +870,7 @@ namespace comp
 	bool ignition_inject::build_view(D3DMATRIX& out) const
 	{
 		float r[3][3];
-		euler_to_rotation(m_scene.pitch_deg, m_scene.yaw_deg, m_scene.roll_deg,
-			game::DEG_TO_RAD_NEG, r);
+		camera_rotation(m_scene.pitch_deg, m_scene.yaw_deg, m_scene.roll_deg, r);
 
 		// The game scales rows 0 and 1 by NEGATIVE focal lengths (0x0044D640: `(float)-focalX`
 		// and `(float)-focalY`), and its screen Y grows downward. Folding both facts in:

@@ -170,16 +170,16 @@ namespace comp::game
 		return *reinterpret_cast<ign_object***>(rebase(ADDR_g_objectList));
 	}
 
-	// Angle -> radians with the game's own sign convention. The constant at 0x0046DC50 is
-	// -pi/1800, NOT -pi/180: angles are in 1/10 degree units, so a full turn is 3600. The
+	// Camera angle -> radians, with the game's own sign convention. The constant at 0x0046DC50
+	// is -pi/1800, NOT -pi/180: angles are in 1/10 degree units, so a full turn is 3600. The
 	// negation is folded in here rather than applied ad hoc at each call site.
-	constexpr double ANGLE_TO_RAD_NEG = -0.0017453292519943333;
+	constexpr double CAM_ANGLE_TO_RAD_NEG = -0.0017453292519943333;
 
-	// Object Euler angles use the same 1/10 degree units -- 0x0044DC20 normalises them
-	// against 0xE10 (3600), which is a full turn. They are NOT a different scale from the
-	// camera's; treating them as such makes every object rotate a tenth as far as it should.
-	constexpr double DEG_TO_RAD_NEG = ANGLE_TO_RAD_NEG;
-	constexpr double OBJ_ANGLE_TO_RAD_NEG = ANGLE_TO_RAD_NEG;
+	// Object Euler angles share the 1/10 degree scale -- 0x0044E160 normalises them against
+	// 0xE10 (3600), a full turn -- but NOT the camera's signs. The camera evaluates sin/cos at
+	// runtime on the negated angle; objects index the shared trig table at 0x00621EA4, and the
+	// index the table is read at supplies the sign per axis. See object_rotation().
+	constexpr double OBJ_ANGLE_TO_RAD = 0.0017453292519943333;
 
 	// Face UVs are 24.8 fixed point in texels: the rasterizer computes (u >> 4) * 0.0625,
 	// which is u / 256.
