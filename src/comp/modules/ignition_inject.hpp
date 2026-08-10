@@ -211,6 +211,11 @@ namespace comp
 		void release_all();
 
 		std::vector<queued_instance> m_queue;
+
+		// Objects already queued this frame. The game's render passes overlap almost entirely,
+		// so merging them without this submits most of the world twice.
+		std::unordered_set<const game::ign_object*> m_queued_objects;
+
 		std::unordered_map<game::ign_mesh*, mesh_geometry> m_geometry;
 
 		std::vector<sprite_instance> m_sprites;
@@ -256,6 +261,7 @@ namespace comp
 		uint32_t m_obj_no_mesh = 0;
 		uint32_t m_obj_insane_counts = 0;
 		uint32_t m_obj_extract_failed = 0;
+		uint32_t m_obj_duplicate_pass = 0;
 
 
 		uint32_t m_viewport_index = 0;

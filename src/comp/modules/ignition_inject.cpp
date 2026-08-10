@@ -997,6 +997,7 @@ namespace comp
 			m_scene_valid = true;
 			m_queue.clear();
 			m_sprites.clear();
+			m_queued_objects.clear();
 		}
 		else
 		{
@@ -1031,6 +1032,17 @@ namespace comp
 			const auto obj = objects[i];
 			if (!obj || !obj->mesh) {
 				++m_obj_no_mesh;
+				continue;
+			}
+
+			// The passes overlap heavily: BuildObjectList (0x0044BE30) branches on
+			// `DAT_00622E84 == 0` and takes everything in the streamed neighbourhood, so a
+			// filtered pass is always a subset of the unfiltered one. Measured live while
+			// driving, 275 of ~300 objects appear in both, and merging them naively queued each
+			// one twice. Two coincident copies of a surface is pathological for a path tracer,
+			// and doubles the compositing of the translucent opcodes (0x13 at 50%, 0x18 at 31%).
+			if (!m_queued_objects.insert(obj).second) {
+				++m_obj_duplicate_pass;
 				continue;
 			}
 
@@ -1133,14 +1145,14 @@ namespace comp
 			shared::common::log("Ignition", std::format(
 				"captures={} (noScene={} noDevice={} skippedViewport={}) endScenes={} submits={} "
 				"lastDraws={} lastVerts={} lastSprites={} meshes={} tex(built={} pages={} miss={} oob={} unset={} missIds={}) "
-				"rebuilds={} fail(vb={} tex={} noMesh={} insane={} extract={}) merged={} "
+				"rebuilds={} fail(vb={} tex={} noMesh={} insane={} extract={}) merged={} dupObjs={} "
 				"lists(world={} dropped={} other={}) lastDrawErr=0x{:08X}",
 				m_captures, m_captures_no_scene, m_captures_no_device, m_captures_skipped_viewport,
 				m_end_scenes, m_submits, m_last_draws, m_last_vertices, m_last_sprites, m_geometry.size(),
 				m_textures_built, m_texture_pages.size(), m_texture_misses,
 				m_tex_index_oob, m_tex_entry_unset, m_missing_ids.size(), m_geometry_rebuilds,
 				m_vb_create_failed, m_tex_create_failed, m_obj_no_mesh, m_obj_insane_counts,
-				m_obj_extract_failed, m_captures_merged_pass,
+				m_obj_extract_failed, m_captures_merged_pass, m_obj_duplicate_pass,
 				s_world_lists_seen, s_world_lists_dropped, s_other_lists_seen,
 				static_cast<uint32_t>(m_last_draw_error)),
 				shared::common::LOG_TYPE::LOG_TYPE_DEFAULT, true);
