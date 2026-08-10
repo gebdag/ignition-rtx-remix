@@ -347,10 +347,17 @@ namespace comp
 
 		dump_texture_debug(tex_id, src);
 
-		// A re-upload to the same id means new content; drop the stale conversion.
-		if (const auto it = m_textures.find(tex_id); it != m_textures.end()) {
-			if (it->second) it->second->Release();
-			m_textures.erase(it);
+		// A re-upload to the same id means new content; drop the stale conversions -- the whole
+		// page and every frame cut out of it.
+		for (auto it = m_textures.begin(); it != m_textures.end(); )
+		{
+			if (static_cast<int32_t>(it->first >> 8) == tex_id) {
+				if (it->second) it->second->Release();
+				it = m_textures.erase(it);
+			}
+			else {
+				++it;
+			}
 		}
 	}
 
@@ -453,13 +460,15 @@ namespace comp
 		}
 	}
 
-	IDirect3DTexture9* ignition_inject::texture_for(IDirect3DDevice9* dev, const int32_t tex_id)
+	IDirect3DTexture9* ignition_inject::texture_for(IDirect3DDevice9* dev, const int32_t tex_id,
+	                                               const int32_t tile)
 	{
 		if (tex_id == game::TEX_ID_INVALID) {
 			return m_white_texture;
 		}
 
-		if (const auto it = m_textures.find(tex_id); it != m_textures.end()) {
+		const int64_t key = texture_key(tex_id, tile);
+		if (const auto it = m_textures.find(key); it != m_textures.end()) {
 			return it->second ? it->second : m_white_texture;
 		}
 
@@ -470,12 +479,17 @@ namespace comp
 			return m_white_texture;
 		}
 
+		const bool whole_page = (tile == NO_TILE);
+		const int32_t size = whole_page ? game::TEXTURE_SIZE : TILE_SIZE;
+		const int32_t src_x = whole_page ? 0 : (tile % TILE_GRID) * TILE_SIZE;
+		const int32_t src_y = whole_page ? 0 : (tile / TILE_GRID) * TILE_SIZE;
+
 		IDirect3DTexture9* tex = nullptr;
-		if (FAILED(dev->CreateTexture(game::TEXTURE_SIZE, game::TEXTURE_SIZE, 1, 0,
+		if (FAILED(dev->CreateTexture(size, size, 1, 0,
 			D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &tex, nullptr)) || !tex)
 		{
 			++m_tex_create_failed;
-			m_textures[tex_id] = nullptr;
+			m_textures[key] = nullptr;
 			return m_white_texture;
 		}
 
@@ -484,18 +498,22 @@ namespace comp
 		{
 			const auto& bytes = page->second.pixels;
 			const auto& pal = page->second.palette;
-			for (int y = 0; y < game::TEXTURE_SIZE; ++y)
+			for (int32_t y = 0; y < size; ++y)
 			{
 				auto* dst = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(rect.pBits) + y * rect.Pitch);
-				for (int x = 0; x < game::TEXTURE_SIZE; ++x) {
-					dst[x] = pal[bytes[y * game::TEXTURE_SIZE + x]];
+				const uint8_t* row = &bytes[(src_y + y) * game::TEXTURE_SIZE + src_x];
+				for (int32_t x = 0; x < size; ++x) {
+					dst[x] = pal[row[x]];
 				}
 			}
 			tex->UnlockRect(0);
 		}
 
 		++m_textures_built;
-		m_textures[tex_id] = tex;
+		if (!whole_page) {
+			++m_tiles_built;
+		}
+		m_textures[key] = tex;
 		return tex;
 	}
 
@@ -550,6 +568,39 @@ namespace comp
 			int32_t src_index[3];             // mesh vertex indices, for sharing normals
 			float area_nx, area_ny, area_nz;  // un-normalised face normal (length == 2*area)
 			ffp_vertex v[3];
+			int32_t tile;                     // NO_TILE unless the UVs sit inside one frame
+		};
+
+		// The 64x64 frame a triangle's UVs sit inside, or NO_TILE when they span more than one.
+		//
+		// Ignition insets a frame's UVs by about two texels, so a frame that occupies tile column
+		// 0 spans roughly 0.007 to 0.242 rather than a clean 0 to 0.25. Testing the bounds
+		// against the tile they start in absorbs that without a tolerance to tune.
+		const auto tile_of = [](const ffp_vertex (&v)[3]) -> int32_t
+		{
+			float u_min = v[0].u, u_max = v[0].u, v_min = v[0].v, v_max = v[0].v;
+			for (int k = 1; k < 3; ++k) {
+				u_min = std::min(u_min, v[k].u); u_max = std::max(u_max, v[k].u);
+				v_min = std::min(v_min, v[k].v); v_max = std::max(v_max, v[k].v);
+			}
+
+			if (u_min < 0.0f || v_min < 0.0f || u_max > 1.0f || v_max > 1.0f) {
+				return NO_TILE;
+			}
+
+			const int32_t col = static_cast<int32_t>(u_min / TILE_UV);
+			const int32_t row = static_cast<int32_t>(v_min / TILE_UV);
+			if (col >= TILE_GRID || row >= TILE_GRID) {
+				return NO_TILE;
+			}
+
+			// A face exactly filling a tile lands on the boundary, so the far edge is compared
+			// against the tile it closes rather than the one it touches.
+			if (u_max > (col + 1) * TILE_UV || v_max > (row + 1) * TILE_UV) {
+				return NO_TILE;
+			}
+
+			return row * TILE_GRID + col;
 		};
 		std::vector<pending_tri> tris;
 
@@ -613,6 +664,23 @@ namespace comp
 				pt.material = game::face_material_for(op);
 				pt.src_index[0] = idx[0]; pt.src_index[1] = idx[1]; pt.src_index[2] = idx[2];
 				pt.v[0] = tri[0]; pt.v[1] = tri[1]; pt.v[2] = tri[2];
+
+				// Only textured faces have a page to cut a frame out of; flat ones carry a colour
+				// over the white texture.
+				pt.tile = textured ? tile_of(pt.v) : NO_TILE;
+				if (pt.tile != NO_TILE)
+				{
+					// Rewrite onto the frame's own unit square. The animation then moves the
+					// TEXTURE rather than these coordinates, which is the whole point: Remix only
+					// re-uploads vertex data when positions move.
+					const float u0 = (pt.tile % TILE_GRID) * TILE_UV;
+					const float v0 = (pt.tile / TILE_GRID) * TILE_UV;
+					for (auto& t : pt.v) {
+						t.u = (t.u - u0) * TILE_GRID;
+						t.v = (t.v - v0) * TILE_GRID;
+					}
+				}
+
 				tris.push_back(pt);
 			};
 
@@ -686,7 +754,7 @@ namespace comp
 		// the right order when the geometry is rasterized rather than path traced.
 		const auto part_key = [](const pending_tri& t) {
 			return std::tuple{ t.material.blend, t.material.chroma_keyed, t.material.opacity,
-			                   t.textured, t.tex_sel, t.colour };
+			                   t.textured, t.tex_sel, t.tile, t.colour };
 		};
 
 		std::stable_sort(tris.begin(), tris.end(), [&](const pending_tri& a, const pending_tri& b) {
@@ -698,7 +766,7 @@ namespace comp
 		{
 			if (parts.empty() || part_key(tris[i - 1]) != part_key(tris[i])) {
 				parts.push_back({ tris[i].tex_sel, tris[i].colour, tris[i].textured,
-				                  tris[i].material, static_cast<uint32_t>(i), 0 });
+				                  tris[i].material, tris[i].tile, static_cast<uint32_t>(i), 0 });
 			}
 			++parts.back().triangle_count;
 			out.insert(out.end(), tris[i].v, tris[i].v + 3);
@@ -1387,12 +1455,12 @@ namespace comp
 
 			shared::common::log("Ignition", std::format(
 				"captures={} (noScene={} noDevice={} skippedViewport={}) endScenes={} submits={} "
-				"lastDraws={} lastVerts={} lastSprites={} meshes={} tex(built={} pages={} miss={} oob={} unset={} missIds={}) "
+				"lastDraws={} lastVerts={} lastSprites={} meshes={} tex(built={} tiles={} pages={} miss={} oob={} unset={} missIds={}) "
 				"rebuilds={} fail(vb={} tex={} noMesh={} insane={} extract={}) merged={} dupObjs={} "
 				"lifted={} lastLift={:.1f} lists(world={} dropped={} other={}) lastDrawErr=0x{:08X}",
 				m_captures, m_captures_no_scene, m_captures_no_device, m_captures_skipped_viewport,
 				m_end_scenes, m_submits, m_last_draws, m_last_vertices, m_last_sprites, m_geometry.size(),
-				m_textures_built, m_texture_pages.size(), m_texture_misses,
+				m_textures_built, m_tiles_built, m_texture_pages.size(), m_texture_misses,
 				m_tex_index_oob, m_tex_entry_unset, m_missing_ids.size(), m_geometry_rebuilds,
 				m_vb_create_failed, m_tex_create_failed, m_obj_no_mesh, m_obj_insane_counts,
 				m_obj_extract_failed, m_captures_merged_pass, m_obj_duplicate_pass,
@@ -1603,7 +1671,9 @@ namespace comp
 
 		for (const auto& run : runs)
 		{
-			dev->SetTexture(0, texture_for(dev, run.tex_id));
+			// Sprites keep the whole page: their UV rect is per record rather than per tile, and
+			// their corners are rebuilt every frame anyway, so Remix always re-uploads them.
+			dev->SetTexture(0, texture_for(dev, run.tex_id, NO_TILE));
 			apply_material(dev, run.material, 0x00FFFFFFu);
 			dev->DrawPrimitive(D3DPT_TRIANGLELIST, run.first_vertex, run.vertex_count / 3);
 		}
@@ -1743,7 +1813,7 @@ namespace comp
 					if (why == game::tex_resolve::index_out_of_range) ++m_tex_index_oob;
 					else if (why == game::tex_resolve::table_entry_unset) ++m_tex_entry_unset;
 
-					dev->SetTexture(0, texture_for(dev, tex_id));
+					dev->SetTexture(0, texture_for(dev, tex_id, part.tile));
 				}
 				else {
 					dev->SetTexture(0, m_white_texture);

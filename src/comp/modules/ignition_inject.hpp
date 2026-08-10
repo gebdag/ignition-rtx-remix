@@ -128,9 +128,22 @@ namespace comp
 			uint32_t colour;        // 0x00RRGGBB modulated over the texture; white when textured
 			bool textured;          // false for flat-shaded faces, which get the white texture
 			game::face_material material;
+
+			// Which 64x64 tile of the page this run samples, as row * 4 + column, or NO_TILE when
+			// its UVs span more than one. A run pinned to a single tile is cut out into its own
+			// texture and its UVs rewritten to the unit square -- see extract_geometry.
+			int32_t tile;
+
 			uint32_t first_triangle;
 			uint32_t triangle_count;
 		};
+
+		// A 256x256 page carries a 4x4 grid of 64x64 frames, so one tile is a quarter of the
+		// page in each axis.
+		static constexpr int32_t NO_TILE = -1;
+		static constexpr int32_t TILE_GRID = 4;
+		static constexpr int32_t TILE_SIZE = game::TEXTURE_SIZE / TILE_GRID;
+		static constexpr float TILE_UV = 1.0f / TILE_GRID;
 
 		// A mesh uploaded once and reused for as long as the game leaves it alone, which is what
 		// lets Remix keep the acceleration structure it builds. `signature` is what detects the
@@ -227,9 +240,26 @@ namespace comp
 		                            std::vector<mesh_part>& parts);
 
 		// Textures arrive before a device exists, so the raw 8bpp page is kept and converted on
-		// first use. Keyed by GrMipMapId_t, which is what g_texTable stores and what the game's
-		// own guTexSource call would have received.
-		IDirect3DTexture9* texture_for(IDirect3DDevice9* dev, int32_t tex_id);
+		// first use. `tile` cuts one 64x64 frame out of the page instead of returning the whole
+		// thing; NO_TILE gives the full page.
+		//
+		// Cutting frames out is what makes animation survive path tracing. Ignition animates by
+		// walking the UVs across a page, and Remix only re-uploads a mesh's vertex data when the
+		// POSITIONS change (rtx_scene_manager.cpp: a texcoord-only change is classified
+		// kUpdateInstance, and cacheVertexDataOnGPU runs only for kBuildBVH / kUpdateBVH). Water
+		// whose vertices never move therefore keeps the UVs it had when its BLAS was built, while
+		// the bound texture still swaps every frame -- so a frozen UV rect gets sampled out of
+		// whichever page is current, which is where the foreign artwork came from.
+		//
+		// One texture per frame moves the animation off the vertex data and onto the material,
+		// which Remix does update every frame. It also lets a mod replace a single frame instead
+		// of a whole shared page.
+		IDirect3DTexture9* texture_for(IDirect3DDevice9* dev, int32_t tex_id, int32_t tile);
+
+		// (tex_id, tile) as one key, so a page and its frames share an eviction path.
+		static int64_t texture_key(const int32_t tex_id, const int32_t tile) {
+			return (static_cast<int64_t>(tex_id) << 8) | static_cast<uint8_t>(tile + 1);
+		}
 
 		// Debug aid gated by [Ignition] DumpTextures: writes the raw source page, the remap
 		// table and the format flag so the encoding can be settled from data.
@@ -279,7 +309,8 @@ namespace comp
 		};
 
 		std::unordered_map<int32_t, texture_page> m_texture_pages;
-		std::unordered_map<int32_t, IDirect3DTexture9*> m_textures;
+		std::unordered_map<int64_t, IDirect3DTexture9*> m_textures;   // keyed by texture_key()
+		uint32_t m_tiles_built = 0;
 		uint32_t m_textures_built = 0;
 		uint32_t m_texture_misses = 0;
 
