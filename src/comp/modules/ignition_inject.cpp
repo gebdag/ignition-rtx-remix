@@ -944,6 +944,13 @@ namespace comp
 	// extraction, so only the handful of meshes that actually changed pay for a rebuild.
 	void ignition_inject::log_animation_state(const game::ign_mesh* mesh) const
 	{
+		// One line per distinct selector rather than one for the whole mesh. A mesh spans several
+		// texture pages, and the first textured face is usually a static one -- logging only that
+		// reported a single frozen state for water that was in fact cycling seven tiles across
+		// two pages. The animations that cross a page boundary are exactly the interesting ones.
+		int32_t seen[8]{};
+		uint32_t seen_count = 0;
+
 		const auto* cur = static_cast<const uint8_t*>(game::mesh_faces(mesh));
 		for (int32_t i = 0; i < mesh->face_count; ++i)
 		{
@@ -960,17 +967,25 @@ namespace comp
 			{
 				const auto* f = reinterpret_cast<const game::ign_face_tri*>(cur);
 
-				// The page a selector resolves against belongs to the object, not the mesh, and
-				// one mesh is instanced by objects on different pages -- so this reports the
-				// selector as authored and leaves the table lookup to submit time.
-				const int32_t page = f->tex_sel >> 16;
-				shared::common::log("IgnAnim", std::format(
-					"scene={} mesh=0x{:08X} op=0x{:02X} texSel=0x{:08X} page={} uv0=({},{}) "
-					"tile=r{}c{}", m_scenes_submitted, reinterpret_cast<uintptr_t>(mesh), op,
-					static_cast<uint32_t>(f->tex_sel), page, f->u0, f->v0,
-					f->v0 / 0x4000, f->u0 / 0x4000),
-					shared::common::LOG_TYPE::LOG_TYPE_DEFAULT, true);
-				return;
+				bool known = false;
+				for (uint32_t s = 0; s < seen_count; ++s) {
+					known = known || seen[s] == f->tex_sel;
+				}
+
+				if (!known && seen_count < std::size(seen))
+				{
+					seen[seen_count++] = f->tex_sel;
+
+					// The page a selector resolves against belongs to the object, not the mesh,
+					// and one mesh is instanced by objects on different pages, so the table
+					// lookup stays at submit time and this reports the selector as authored.
+					shared::common::log("IgnAnim", std::format(
+						"scene={} mesh=0x{:08X} op=0x{:02X} texSel=0x{:08X} page={} uv0=({},{}) "
+						"tile=r{}c{}", m_scenes_submitted, reinterpret_cast<uintptr_t>(mesh), op,
+						static_cast<uint32_t>(f->tex_sel), f->tex_sel >> 16, f->u0, f->v0,
+						f->v0 / 0x4000, f->u0 / 0x4000),
+						shared::common::LOG_TYPE::LOG_TYPE_DEFAULT, true);
+				}
 			}
 
 			cur += stride;
