@@ -883,10 +883,28 @@ namespace comp
 		r[0][1] = -r[0][1];
 		r[0][2] = -r[0][2];
 
+		// The eye sits near_clamp BEHIND the camera position the scene reports.
+		//
+		// The game's perspective divisor is not the view depth. 0x0044D640 scales row 2 by 2^18
+		// and then takes `w = (v.row2 >> 16) + g_nearClamp` with `g_nearClamp = near_clamp << 2`,
+		// so w = 4 * (view_z + near_clamp) -- an unconditional depth bias, separate from the
+		// clamp on the next line that only guards against a division by zero.
+		//
+		// Adding a constant to the divisor is exactly what moving the eye back along its own
+		// forward axis does: view_z gains near_clamp while view_x and view_y are untouched,
+		// because the basis is orthonormal. Folding it in here keeps the projection an ordinary
+		// pinhole perspective, which is what Remix expects to decompose, and puts the eye where
+		// the game's own screen mapping implies it is.
+		//
+		// Measured against the game's transformed-vertex pool for a car on a slope: 7.4 pixels
+		// of error without this, 0.13 with it. The error is a scale about the screen centre of
+		// (view_z + near_clamp)/view_z, so it grows the closer an object is -- which is why the
+		// car showed it and distant scenery did not.
+		const float eye_back = static_cast<float>(m_scene.near_clamp > 0 ? m_scene.near_clamp : 0);
 		const float cam[3] = {
-			static_cast<float>(m_scene.cam_x),
-			static_cast<float>(m_scene.cam_y),
-			static_cast<float>(m_scene.cam_z),
+			static_cast<float>(m_scene.cam_x) - eye_back * r[2][0],
+			static_cast<float>(m_scene.cam_y) - eye_back * r[2][1],
+			static_cast<float>(m_scene.cam_z) - eye_back * r[2][2],
 		};
 
 		// viewPos = R * (worldPos - cam); in row-vector form that is the transpose of R.
