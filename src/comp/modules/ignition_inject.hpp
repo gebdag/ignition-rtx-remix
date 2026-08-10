@@ -145,6 +145,13 @@ namespace comp
 			uint32_t last_checked_scene;
 			uint64_t signature;
 			std::vector<mesh_part> parts;
+
+			// Object-space positions in vertex-buffer order, three per triangle, kept so the
+			// ground probe can work on the CPU. Positions only -- normals and UVs are not needed
+			// and would triple the memory.
+			std::vector<float> positions;
+			float bbox_min[3];
+			float bbox_max[3];
 		};
 
 		struct queued_instance
@@ -152,6 +159,10 @@ namespace comp
 			const mesh_geometry* geometry;
 			D3DMATRIX world;
 			int32_t tex_page;
+
+			// Ignition rotates cars and nothing else -- track scenery is always axis aligned
+			// with a fixed translation -- so this is also "can sink into the road".
+			bool dynamic;
 		};
 
 		// One sprite, anchored in world space. Sprites cannot live in the per-mesh cache: they are
@@ -167,6 +178,26 @@ namespace comp
 			int32_t tex_id;
 			game::face_material material;
 		};
+
+		// Raises cars that Ignition left inside the road, by the measured deficit and no more.
+		//
+		// The game sorts whole triangles into depth buckets and paints them far to near, so a
+		// wheel two thirds inside a road triangle still draws in full -- ordering is per
+		// triangle, never per pixel. Remix path traces real occlusion, so the buried part is
+		// simply gone. Measured on a slope in Canada: four 27-unit wheels sitting 16 to 20 units
+		// under the surface, with the car's origin exactly on it.
+		//
+		// A car already clear of the road keeps the transform the game gave it, untouched.
+		void apply_ground_lift();
+
+		// Shared lift for one car's instances. They must move together or the car comes apart,
+		// so the group takes the largest deficit any of its parts has.
+		void lift_group(const std::vector<uint32_t>& group);
+
+		// Topmost static-geometry surface under (x, z), or false if nothing covers it. Surfaces
+		// above `ceiling` are ignored so a bridge deck or a tunnel roof cannot be mistaken for
+		// the road and launch the car onto it.
+		bool surface_at(float x, float z, float ceiling, float& out_y) const;
 
 		void submit(IDirect3DDevice9* dev);
 		static void apply_material(IDirect3DDevice9* dev, const game::face_material& mat,
@@ -274,6 +305,25 @@ namespace comp
 		// A mesh larger than this is almost certainly a bad pointer rather than real geometry.
 		static constexpr int32_t MAX_SANE_VERTICES = 65536;
 		static constexpr int32_t MAX_SANE_FACES = 65536;
+
+		// One car arrives as several instances sharing the object position the game gives them:
+		// body, wheels, shadow quad. Measured live, the parts sat within 10 units of each other
+		// while the nearest other car was hundreds away.
+		static constexpr float CAR_PART_RADIUS = 64.0f;
+
+		// Contact points taken from each part's own lowest vertices. Per part, not per car: on a
+		// slope the uphill wheels sit higher yet dig in deeper (measured -19 and -20 against -16
+		// and -17 for the downhill pair), so the car's globally lowest vertices are the wrong
+		// corner to measure.
+		static constexpr uint32_t CONTACT_SAMPLES = 4;
+
+		// Bounds both how far a car may be raised and how far above it a surface may be before
+		// it stops counting as road.
+		static constexpr float LIFT_LIMIT = 64.0f;
+
+		uint32_t m_lifted_groups = 0;
+		float m_last_lift = 0.0f;
+		std::vector<float> m_contact_points;   // xyz triples, reused to keep this allocation-free
 
 		uint32_t m_last_draws = 0;
 		uint32_t m_last_vertices = 0;

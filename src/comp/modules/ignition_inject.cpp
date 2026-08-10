@@ -213,6 +213,7 @@ namespace comp
 
 		bool s_smooth_normals = true;
 		float s_smooth_cos_threshold = 0.5f;   // 60 degrees
+		bool s_ground_lift = true;
 
 		void load_smoothing_settings()
 		{
@@ -220,6 +221,7 @@ namespace comp
 			s_smooth_normals = cfg.get_bool("Ignition", "SmoothNormals", true);
 			const float deg = cfg.get_float("Ignition", "SmoothAngleDegrees", 60.0f);
 			s_smooth_cos_threshold = cosf(deg * 3.14159265f / 180.0f);
+			s_ground_lift = cfg.get_bool("Ignition", "GroundLift", true);
 		}
 	}
 
@@ -740,7 +742,193 @@ namespace comp
 		geo.vertex_count = static_cast<uint32_t>(vertices.size());
 		geo.triangle_count = geo.vertex_count / 3;
 		geo.parts = std::move(parts);
+
+		geo.positions.resize(vertices.size() * 3);
+		geo.bbox_min[0] = geo.bbox_min[1] = geo.bbox_min[2] = FLT_MAX;
+		geo.bbox_max[0] = geo.bbox_max[1] = geo.bbox_max[2] = -FLT_MAX;
+		for (size_t i = 0; i < vertices.size(); ++i)
+		{
+			const float p[3] = { vertices[i].x, vertices[i].y, vertices[i].z };
+			for (int a = 0; a < 3; ++a) {
+				geo.positions[i * 3 + a] = p[a];
+				geo.bbox_min[a] = std::min(geo.bbox_min[a], p[a]);
+				geo.bbox_max[a] = std::max(geo.bbox_max[a], p[a]);
+			}
+		}
 		return true;
+	}
+
+	// Height of the triangle's plane at (x, z), or false when (x, z) is outside it.
+	// `p` is nine floats: three vertices, xyz each.
+	static bool triangle_height(const float* p, const float x, const float z, float& out_y)
+	{
+		const float x0 = p[0], y0 = p[1], z0 = p[2];
+		const float x1 = p[3], y1 = p[4], z1 = p[5];
+		const float x2 = p[6], y2 = p[7], z2 = p[8];
+
+		const float det = (z1 - z2) * (x0 - x2) + (x2 - x1) * (z0 - z2);
+		if (fabsf(det) < 1e-6f) {
+			return false;    // degenerate in plan view -- a wall, which is never a surface
+		}
+
+		const float a = ((z1 - z2) * (x - x2) + (x2 - x1) * (z - z2)) / det;
+		const float b = ((z2 - z0) * (x - x2) + (x0 - x2) * (z - z2)) / det;
+		const float c = 1.0f - a - b;
+		if (a < 0.0f || b < 0.0f || c < 0.0f) {
+			return false;
+		}
+
+		out_y = a * y0 + b * y1 + c * y2;
+		return true;
+	}
+
+	bool ignition_inject::surface_at(const float x, const float z, const float ceiling,
+	                                 float& out_y) const
+	{
+		bool found = false;
+		float best = -FLT_MAX;
+
+		for (const auto& inst : m_queue)
+		{
+			if (inst.dynamic || !inst.geometry) {
+				continue;    // a car cannot be the road another car rests on
+			}
+
+			// Unrotated instances carry a pure translation, so the mesh bounds move with it and
+			// this rejects almost everything before a single triangle is touched.
+			const auto& geo = *inst.geometry;
+			if (geo.positions.empty()
+				|| x < geo.bbox_min[0] + inst.world._41 || x > geo.bbox_max[0] + inst.world._41
+				|| z < geo.bbox_min[2] + inst.world._43 || z > geo.bbox_max[2] + inst.world._43) {
+				continue;
+			}
+
+			const float lx = x - inst.world._41;
+			const float lz = z - inst.world._43;
+			for (uint32_t t = 0; t < geo.triangle_count; ++t)
+			{
+				float y = 0.0f;
+				if (!triangle_height(&geo.positions[t * 9], lx, lz, y)) {
+					continue;
+				}
+				y += inst.world._42;
+				if (y <= ceiling && y > best) {
+					best = y;
+					found = true;
+				}
+			}
+		}
+
+		out_y = best;
+		return found;
+	}
+
+	void ignition_inject::apply_ground_lift()
+	{
+		if (!s_ground_lift) {
+			return;
+		}
+
+		std::vector<uint32_t> movers;
+		for (uint32_t i = 0; i < m_queue.size(); ++i) {
+			if (m_queue[i].dynamic) {
+				movers.push_back(i);
+			}
+		}
+		if (movers.empty()) {
+			return;
+		}
+
+		std::vector<bool> grouped(movers.size(), false);
+		std::vector<uint32_t> group;
+		for (size_t a = 0; a < movers.size(); ++a)
+		{
+			if (grouped[a]) {
+				continue;
+			}
+
+			group.clear();
+			group.push_back(movers[a]);
+			grouped[a] = true;
+
+			const auto& anchor = m_queue[movers[a]].world;
+			for (size_t b = a + 1; b < movers.size(); ++b)
+			{
+				if (grouped[b]) {
+					continue;
+				}
+				const auto& w = m_queue[movers[b]].world;
+				const float dx = w._41 - anchor._41;
+				const float dy = w._42 - anchor._42;
+				const float dz = w._43 - anchor._43;
+				if (dx * dx + dy * dy + dz * dz <= CAR_PART_RADIUS * CAR_PART_RADIUS) {
+					grouped[b] = true;
+					group.push_back(movers[b]);
+				}
+			}
+
+			lift_group(group);
+		}
+	}
+
+	void ignition_inject::lift_group(const std::vector<uint32_t>& group)
+	{
+		float lift = 0.0f;
+
+		for (const uint32_t index : group)
+		{
+			const auto& inst = m_queue[index];
+			if (!inst.geometry || inst.geometry->positions.empty()) {
+				continue;
+			}
+
+			const auto& geo = *inst.geometry;
+			const auto& w = inst.world;
+
+			m_contact_points.clear();
+			m_contact_points.reserve(geo.vertex_count * 3);
+			for (uint32_t v = 0; v < geo.vertex_count; ++v)
+			{
+				const float* p = &geo.positions[v * 3];
+				m_contact_points.push_back(p[0] * w._11 + p[1] * w._21 + p[2] * w._31 + w._41);
+				m_contact_points.push_back(p[0] * w._12 + p[1] * w._22 + p[2] * w._32 + w._42);
+				m_contact_points.push_back(p[0] * w._13 + p[1] * w._23 + p[2] * w._33 + w._43);
+			}
+
+			// The lowest few vertices of this part are its contact points. Selecting by index
+			// order would sample whatever the face stream happened to list first.
+			const uint32_t count = geo.vertex_count;
+			const uint32_t samples = std::min(CONTACT_SAMPLES, count);
+			std::vector<uint32_t> order(count);
+			for (uint32_t v = 0; v < count; ++v) {
+				order[v] = v;
+			}
+			std::partial_sort(order.begin(), order.begin() + samples, order.end(),
+				[this](const uint32_t l, const uint32_t r) {
+					return m_contact_points[l * 3 + 1] < m_contact_points[r * 3 + 1];
+				});
+
+			for (uint32_t s = 0; s < samples; ++s)
+			{
+				const float* p = &m_contact_points[order[s] * 3];
+				float surface = 0.0f;
+				if (surface_at(p[0], p[2], w._42 + LIFT_LIMIT, surface)) {
+					lift = std::max(lift, surface - p[1]);
+				}
+			}
+		}
+
+		if (lift <= 0.0f) {
+			return;    // already clear of the road: leave the game's transform alone
+		}
+
+		lift = std::min(lift, LIFT_LIMIT);
+		for (const uint32_t index : group) {
+			m_queue[index].world._42 += lift;
+		}
+
+		++m_lifted_groups;
+		m_last_lift = lift;
 	}
 
 	// Ignition animates by editing meshes in place -- measured live in a Canada race, 57 of the
@@ -1062,7 +1250,7 @@ namespace comp
 			}
 
 			if (geo && geo->triangle_count) {
-				m_queue.push_back({ geo, world, obj->tex_page });
+				m_queue.push_back({ geo, world, obj->tex_page, !game::object_is_unrotated(obj) });
 			}
 		}
 	}
@@ -1146,13 +1334,14 @@ namespace comp
 				"captures={} (noScene={} noDevice={} skippedViewport={}) endScenes={} submits={} "
 				"lastDraws={} lastVerts={} lastSprites={} meshes={} tex(built={} pages={} miss={} oob={} unset={} missIds={}) "
 				"rebuilds={} fail(vb={} tex={} noMesh={} insane={} extract={}) merged={} dupObjs={} "
-				"lists(world={} dropped={} other={}) lastDrawErr=0x{:08X}",
+				"lifted={} lastLift={:.1f} lists(world={} dropped={} other={}) lastDrawErr=0x{:08X}",
 				m_captures, m_captures_no_scene, m_captures_no_device, m_captures_skipped_viewport,
 				m_end_scenes, m_submits, m_last_draws, m_last_vertices, m_last_sprites, m_geometry.size(),
 				m_textures_built, m_texture_pages.size(), m_texture_misses,
 				m_tex_index_oob, m_tex_entry_unset, m_missing_ids.size(), m_geometry_rebuilds,
 				m_vb_create_failed, m_tex_create_failed, m_obj_no_mesh, m_obj_insane_counts,
 				m_obj_extract_failed, m_captures_merged_pass, m_obj_duplicate_pass,
+				m_lifted_groups, m_last_lift,
 				s_world_lists_seen, s_world_lists_dropped, s_other_lists_seen,
 				static_cast<uint32_t>(m_last_draw_error)),
 				shared::common::LOG_TYPE::LOG_TYPE_DEFAULT, true);
@@ -1393,6 +1582,11 @@ namespace comp
 		if (!build_view(view) || !build_projection(projection)) {
 			return;
 		}
+
+		// Here rather than in capture_scene: the game runs several passes per frame and the
+		// queue is only complete once the last one has been merged, so a car's road may still
+		// be missing while the passes are arriving.
+		apply_ground_lift();
 
 		// nGlide owns the device for the rest of the frame, so every state this replay
 		// touches is captured and put back afterwards.
