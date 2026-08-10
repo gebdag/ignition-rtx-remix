@@ -16,8 +16,8 @@
 !*.inc
 !*.inl
 
-# Build script, tool launchers and config
-!*.bat
+# Build script and tool launchers, top level only -- deps/ vendors its own .bat files
+!/*.bat
 !*.ini
 !*.conf
 !.gitignore
