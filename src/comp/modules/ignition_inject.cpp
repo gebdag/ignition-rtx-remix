@@ -214,6 +214,7 @@ namespace comp
 		bool s_smooth_normals = true;
 		float s_smooth_cos_threshold = 0.5f;   // 60 degrees
 		bool s_ground_lift = true;
+		bool s_log_animation = false;
 
 		void load_smoothing_settings()
 		{
@@ -222,6 +223,7 @@ namespace comp
 			const float deg = cfg.get_float("Ignition", "SmoothAngleDegrees", 60.0f);
 			s_smooth_cos_threshold = cosf(deg * 3.14159265f / 180.0f);
 			s_ground_lift = cfg.get_bool("Ignition", "GroundLift", true);
+			s_log_animation = cfg.get_bool("Ignition", "LogAnimation", false);
 		}
 	}
 
@@ -940,6 +942,41 @@ namespace comp
 	// The signature covers exactly what extract_geometry consumes, and is taken once per mesh per
 	// scene: walking the streams is a few hundred kilobytes of reads, far cheaper than re-running
 	// extraction, so only the handful of meshes that actually changed pay for a rebuild.
+	void ignition_inject::log_animation_state(const game::ign_mesh* mesh) const
+	{
+		const auto* cur = static_cast<const uint8_t*>(game::mesh_faces(mesh));
+		for (int32_t i = 0; i < mesh->face_count; ++i)
+		{
+			const uint32_t op = static_cast<uint32_t>(*reinterpret_cast<const int32_t*>(cur)) & 0xFFu;
+			if (op >= std::size(game::FACE_STRIDE)) {
+				break;
+			}
+			const uint8_t stride = game::FACE_STRIDE[op];
+			if (stride == 0) {
+				break;
+			}
+
+			if (game::face_is_textured_tri(op))
+			{
+				const auto* f = reinterpret_cast<const game::ign_face_tri*>(cur);
+
+				// The page a selector resolves against belongs to the object, not the mesh, and
+				// one mesh is instanced by objects on different pages -- so this reports the
+				// selector as authored and leaves the table lookup to submit time.
+				const int32_t page = f->tex_sel >> 16;
+				shared::common::log("IgnAnim", std::format(
+					"scene={} mesh=0x{:08X} op=0x{:02X} texSel=0x{:08X} page={} uv0=({},{}) "
+					"tile=r{}c{}", m_scenes_submitted, reinterpret_cast<uintptr_t>(mesh), op,
+					static_cast<uint32_t>(f->tex_sel), page, f->u0, f->v0,
+					f->v0 / 0x4000, f->u0 / 0x4000),
+					shared::common::LOG_TYPE::LOG_TYPE_DEFAULT, true);
+				return;
+			}
+
+			cur += stride;
+		}
+	}
+
 	const ignition_inject::mesh_geometry* ignition_inject::geometry_for(IDirect3DDevice9* dev,
 	                                                                    game::ign_mesh* mesh)
 	{
@@ -956,6 +993,9 @@ namespace comp
 					++m_geometry_rebuilds;
 					if (!fill_geometry(dev, mesh, geo)) {
 						return nullptr;
+					}
+					if (s_log_animation) {
+						log_animation_state(mesh);
 					}
 					// Only once the rebuild succeeded, so a failed one is retried rather than
 					// leaving the entry marked current with stale contents.

@@ -214,6 +214,13 @@ namespace comp
 		bool build_projection(D3DMATRIX& out) const;
 		static D3DMATRIX build_world(const game::ign_object* obj);
 
+		// Logs the first textured face of a mesh the game has just edited, gated by
+		// [Ignition] LogAnimation. Ignition animates a texture by rewriting that record in place,
+		// so this is the injector's own view of an animation and lines up directly against
+		// anim_sequence.py's recording of the game's. Two distinct states here against fourteen
+		// there localises the fault to our side of the capture.
+		void log_animation_state(const game::ign_mesh* mesh) const;
+
 		const mesh_geometry* geometry_for(IDirect3DDevice9* dev, game::ign_mesh* mesh);
 		bool fill_geometry(IDirect3DDevice9* dev, const game::ign_mesh* mesh, mesh_geometry& geo);
 		static bool extract_geometry(const game::ign_mesh* mesh, std::vector<ffp_vertex>& out,
