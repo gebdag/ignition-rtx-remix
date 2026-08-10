@@ -16,8 +16,8 @@
 !*.inc
 !*.inl
 
-# Build script and config
-!build.bat
+# Build script, tool launchers and config
+!*.bat
 !*.ini
 !*.conf
 !.gitignore
