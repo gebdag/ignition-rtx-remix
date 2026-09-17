@@ -24,17 +24,22 @@ Ign_3dfx.exe -> glide2x.dll (nGlide) -> d3d9.dll (this mod) -> d3d9_remix.dll (R
 
 ## Requirements
 
-- Ignition, 3dfx version (you must own the game; no game files are included)
-- [nGlide](https://www.zeus-software.com/downloads/nglide) Glide wrapper
-- [RTX Remix runtime](https://github.com/NVIDIAGameWorks/rtx-remix/releases) and an RTX GPU
+- Ignition (tested with the GOG version; you must own the game, no game files are included)
+- [RTX Remix runtime](https://github.com/NVIDIAGameWorks/rtx-remix/releases). I recommend
+  [Remix Plus](https://github.com/RemixProjGroup/dxvk-remix/releases) for the Numos sky implementation
+- An RTX GPU
 
 ## Installing
 
-1. Download the latest release zip from the **Releases** page.
-2. Install nGlide and make sure the game runs through it.
-3. Copy the RTX Remix runtime into the game folder, then rename Remix's `d3d9.dll` to `d3d9_remix.dll`.
-4. Copy `d3d9.dll`, `remix-comp-proxy.ini` and the `.trex` folder from the release zip into the game folder.
-5. Start `Ign_3dfx.exe`. Settings are documented inside `remix-comp-proxy.ini`.
+1. Install the RTX Remix runtime to the game folder.
+2. Rename the RTX Remix `d3d9.dll` to `d3d9_remix.dll`.
+3. Extract the 3dfx patch to the game folder: [ign_3dfx2.zip](http://web.archive.org/web/19981203075024/http://www.uds.se:80/ignition/ign_3dfx2.zip)
+4. Extract the mod archive from the **Releases** page to the Ignition folder.
+5. Go to the `BALTAZAR\DATA` folder.
+6. Make backup copies of `DEFAULT2.PSQ` and `TEST2.PFM` and rename the files `DEFAULT.PSQ` and `TEST.PFM` respectively.
+7. Set graphics options via `nglide_config.exe`.
+8. Set options for increased refresh rate (default 2x speed) or smoothed normals (default on) in `remix-comp-proxy.ini`.
+9. Start the game via `Ign_3dfx.exe`.
 
 ## Building
 
