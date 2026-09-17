@@ -1,4 +1,8 @@
 # Ignition RTX Remix
+<img width="1920" height="1200" alt="trex_Screenshot_2026 07 28_-_11 55 40 81" src="https://github.com/user-attachments/assets/0cdbdf90-d828-45de-a9fe-5c2c82a40b37" />
+<img width="1920" height="1200" alt="trex_Screenshot_2026 07 28_-_11 56 51 28" src="https://github.com/user-attachments/assets/fd6366f0-4645-402b-bb8f-41c47a961069" />
+<img width="1920" height="1200" alt="trex_Screenshot_2026 07 28_-_11 58 21 09" src="https://github.com/user-attachments/assets/1feb3fc0-072e-4163-9a6c-38f60a1ab799" />
+<img width="1920" height="1200" alt="trex_Screenshot_2026 07 28_-_12 01 08 80" src="https://github.com/user-attachments/assets/3da82abb-a8ca-4038-8797-4b5569a0f497" />
 
 An [RTX Remix](https://github.com/NVIDIAGameWorks/rtx-remix) compatibility mod for **Ignition**
 (Unique Development Studios, 1997), 3dfx version (`Ign_3dfx.exe`).
