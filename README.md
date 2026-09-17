@@ -1,76 +1,68 @@
-# remix-comp-proxy
+# Ignition RTX Remix
 
-A DX9 proxy framework for RTX Remix compatibility mods, with built-in fixed-function pipeline (FFP) conversion. Part of the [Vibe Reverse Engineering](https://github.com/Ekozmaster/Vibe-Reverse-Engineering) toolkit.
+An [RTX Remix](https://github.com/NVIDIAGameWorks/rtx-remix) compatibility mod for **Ignition**
+(Unique Development Studios, 1997), 3dfx version (`Ign_3dfx.exe`).
 
-## What It Does
-
-Legacy DX9 games use vertex/pixel shaders that RTX Remix can't inject ray-traced lighting into. This proxy sits between the game and Remix, intercepting D3D9 calls and converting shader-based rendering to fixed-function pipeline calls that Remix understands.
-
-### Core Features
-
-- **Full D3D9 proxy** — d3d9.dll proxy with every IDirect3DDevice9 method intercepted
-- **FFP conversion** — captures VS constants, parses vertex declarations, transposes matrices, and routes draw calls through the D3D9 fixed-function pipeline
-- **Draw routing** — configurable decision trees that classify each draw call (3D geometry, HUD, skinned mesh) and decide whether to convert or pass through
-- **Integrated frame tracer** — captures all D3D9 API calls to JSONL with category filtering, delayed capture, and external trigger support
-- **INI configuration** — game-specific register layouts, albedo stage, skinning toggle, and diagnostics settings in `remix-comp-proxy.ini` (no recompile needed)
-- **ImGui debug overlay** (F4) — live VS constant heatmap, matrix viewer, texture stage bindings, draw stats, FFP enable/disable toggle, tracer controls
-- **Diagnostic logging** — timed frame dump to `rtx_comp\diagnostics.log` for debugging VS register layouts, vertex declarations, and draw call routing
-- **Optional skinning module** — runtime-toggled vertex skinning with bone matrix upload, vertex buffer expansion, and compressed format decoding
-- **DLL chain loading** — pre-load and post-load DLL/ASI injection for additional mods
-- **Component module system** — `shared/` (game-agnostic static lib) + `comp/` (game-specific DLL) with clean separation
-- **Per-game build split** — shared library stays in the base, only `comp/` is copied per game project
-
-### Architecture
+Ignition transforms and rasterizes everything itself and hands Glide finished screen-space
+triangles, so Remix normally has no 3D scene to path trace. This mod is a `d3d9.dll` proxy that
+hooks the game's renderer while geometry is still in object space. It submits the meshes to
+Remix with real world, view and projection transforms and keeps the game's 2D HUD on top.
 
 ```
-src/
-  shared/              Game-agnostic static library
-    common/
-      config.hpp/cpp     INI config reader
-      ffp_state.hpp/cpp  FFP state tracking, transforms, lighting, texture stages
-      ...
-    utils/               Hooking, memory, general utilities
-  comp/                Game-specific DLL (copy this per game)
-    main.cpp             DLL entry, window finding, config loading
-    comp.cpp             Module registration
-    d3d9_proxy.cpp       d3d9.dll export forwarding
-    game/                Game-specific patterns and structs
-    modules/
-      d3d9ex.cpp         D3D9 proxy with FFP + tracer interceptions
-      renderer.cpp       Draw routing decision trees
-      imgui.cpp          Debug overlay with FFP tab
-      tracer.cpp         Integrated frame tracer
-      diagnostics.cpp    Frame logging
-      skinning.cpp       Optional skinning
+Ign_3dfx.exe -> glide2x.dll (nGlide) -> d3d9.dll (this mod) -> d3d9_remix.dll (RTX Remix) -> .trex\
 ```
+
+## Features
+
+- Object-space geometry injection with the game's textures, palettes and animated texture frames
+- Sprites and coloured (untextured) triangles
+- Smoothed vertex normals (Ignition has none) with a configurable crease angle
+- Wheels lifted out of the road surface, which the original depth-bucket renderer hid
+- Render rate unlocked from the 36 Hz logic tick (game speed unchanged)
+- HUD and menus kept, world raster suppressed
+- F4 debug overlay (ImGui)
+
+## Requirements
+
+- Ignition, 3dfx version (you must own the game; no game files are included)
+- [nGlide](https://www.zeus-software.com/downloads/nglide) Glide wrapper
+- [RTX Remix runtime](https://github.com/NVIDIAGameWorks/rtx-remix/releases) and an RTX GPU
+
+## Installing
+
+1. Download the latest release zip from the **Releases** page.
+2. Install nGlide and make sure the game runs through it.
+3. Copy the RTX Remix runtime into the game folder, then rename Remix's `d3d9.dll` to `d3d9_remix.dll`.
+4. Copy `d3d9.dll`, `remix-comp-proxy.ini` and the `.trex` folder from the release zip into the game folder.
+5. Start `Ign_3dfx.exe`. Settings are documented inside `remix-comp-proxy.ini`.
 
 ## Building
 
-1. Run `build.bat` (requires Visual Studio 2022)
-2. Output: `build/bin/release/d3d9.dll`
+Requires Visual Studio 2022 with the C++ x86 toolset and a Windows 10/11 SDK.
 
-For per-game projects: `build.bat release --name GameName --comp path/to/comp`
+```bat
+build.bat
+```
 
-## Deploying
+The output is `build\bin\release\d3d9.dll` plus `remix-comp-proxy.ini`. Use `build.bat debug` for a debug build.
 
-1. Copy `d3d9.dll` to the game directory
-2. Copy `remix-comp-proxy.ini` to the game directory
-3. Edit `remix-comp-proxy.ini` with game-specific settings
-4. Place `d3d9_remix.dll` (RTX Remix) in the game directory
+## Project layout
 
-## Contributors
+```
+src/comp/modules/ignition_inject.*   Ignition renderer hooks and Remix submission
+src/comp/game/                       Ignition addresses and structures
+src/comp/, src/shared/               remix-comp-proxy framework
+deps/                                Vendored dependencies
+assets/remix-comp-proxy.ini          Default configuration
+```
 
-| Who | What | Support |
-|-----|------|---------|
-| [xoxor4d](https://github.com/xoxor4d) | Original [remix-comp-base](https://github.com/xoxor4d/remix-comp-base) framework, D3D9 proxy architecture, ImGui integration, module system | [Ko-Fi](https://ko-fi.com/xoxor4d) / [Patreon](https://patreon.com/xoxor4d) |
-| [kim2091](https://github.com/kim2091) | FFP conversion system, skinning module, diagnostic logging, tracer integration, INI config, toolkit integration | [Ko-Fi](https://ko-fi.com/kim20913944) |
-| [momo5502](https://github.com/momo5502) | Initial codebase that remix-comp-base was built on | |
+## Credits
 
-## Dependencies
-
-- [Dear ImGui](https://github.com/ocornut/imgui) — debug overlay
-- [MinHook](https://github.com/TsudaKageyu/minhook) — function hooking
-- [RTX Remix Bridge API](https://github.com/NVIDIAGameWorks/rtx-remix) — Remix integration
+Built on the remix-comp-proxy framework by [xoxor4d](https://github.com/xoxor4d) and
+[kim2091](https://github.com/kim2091), from the
+[Vibe Reverse Engineering](https://github.com/Ekozmaster/Vibe-Reverse-Engineering) toolkit.
+Third-party components and their licenses are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## License
 

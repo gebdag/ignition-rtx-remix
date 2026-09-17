@@ -1,53 +1,32 @@
-# Whitelist .gitignore — only tracked file types and directories are allowed.
-# Everything else (build artifacts, IDE files, OS junk) is ignored by default.
-# Goal: Prevent uploading files that may be copyrighted or are otherwise unnecessary.
-
-# Ignore everything
-*
-
-# Allow looking into subdirectories
-!*/
-
-# Source code
-!*.cpp
-!*.hpp
-!*.h
-!*.c
-!*.inc
-!*.inl
-
-# Build script and tool launchers, top level only -- deps/ vendors its own .bat files
-!/*.bat
-!*.ini
-!*.conf
-!.gitignore
-!.editorconfig
-
-# Dependency libraries needed for linking
-!*.lib
-
-# Deployed binaries (ASI loader)
-!*.dll
-!*.def
-
-# Assets
-!*.png
-
-# Documentation
-!*.md
-!LICENSE
-!LICENSE.txt
-!AUTHORS.txt
-
-# Analysis tooling for this game (live scene reader, transform validator)
-!*.py
-
-# Re-ignore build output (overrides the above)
+# Build output
 build/
-
-# Ghidra project, generated index and captured logs are large and reproducible
-ghidra/
-index.db
 *.pdb
+*.obj
+*.pch
+*.ilk
+*.exp
+*.idb
+*.ipch
+
+# Runtime output written next to the game or by tools
+rtx_comp/
+captures/
 *.log
+
+# Reverse-engineering tool state
+ghidra/
+*.gpr
+*.rep/
+index.db*
+
+# Local leftovers
 backups/
+__pycache__/
+.venv/
+.vs/
+.vscode/
+.idea/
+.claude/
+*.user
+*.suo
+Thumbs.db
